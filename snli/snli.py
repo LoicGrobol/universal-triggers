@@ -84,7 +84,7 @@ def main():
 
         # find attack candidates using an attack method
         cand_trigger_token_ids = attacks.hotflip_attack(
-            averaged_grad, embedding_weight, trigger_token_ids, num_candidates=40
+            averaged_grad, embedding_weight, num_candidates=40
         )
         # cand_trigger_token_ids = attacks.random_attack(embedding_weight,
         #                                                trigger_token_ids,

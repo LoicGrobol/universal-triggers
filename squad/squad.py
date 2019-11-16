@@ -119,7 +119,6 @@ def main():
         cand_trigger_token_ids = attacks.hotflip_attack(
             averaged_grad,
             embedding_weight,
-            trigger_token_ids,
             num_candidates=num_candidates,
             increase_loss=False,
         )

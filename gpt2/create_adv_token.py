@@ -181,7 +181,6 @@ def run_model():
                 candidates = attacks.hotflip_attack(
                     averaged_grad,
                     embedding_weight,
-                    [trigger_tokens[token_to_flip]],
                     increase_loss=False,
                     num_candidates=100,
                 )[0]

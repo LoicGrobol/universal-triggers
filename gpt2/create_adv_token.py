@@ -165,7 +165,7 @@ def run_model():
 
                 # Get average gradient w.r.t. the triggers
                 loss.backward()
-                averaged_grad = torch.sum(utils.extracted_grads[0], dim=0)
+                averaged_grad = torch.sum(utils.extracted_grads[-1], dim=0)
                 averaged_grad = averaged_grad[token_to_flip].unsqueeze(0)
 
                 # Use hotflip (linear approximation) attack to get the top num_candidates

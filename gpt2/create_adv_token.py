@@ -3,7 +3,7 @@ import sys
 import torch
 import tqdm
 import numpy as np
-from pytorch_transformers import GPT2Tokenizer, GPT2LMHeadModel
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
 import sample_from_gpt2
 
 sys.path.append("..")  # noqa
@@ -87,9 +87,9 @@ def make_target_batch(tokenizer, device, target_texts):
 
 
 def run_model():
-    np.random.seed(0)
-    torch.random.manual_seed(0)
-    torch.cuda.manual_seed(0)
+    # np.random.seed(0)
+    # torch.random.manual_seed(0)
+    # torch.cuda.manual_seed(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")

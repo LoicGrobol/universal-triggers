@@ -1,6 +1,5 @@
 import sys
 import os.path
-from sklearn.neighbors import KDTree
 import torch
 import torch.optim as optim
 from allennlp.data.dataset_readers.stanford_sentiment_tree_bank import (
@@ -19,9 +18,10 @@ from allennlp.training.trainer import Trainer
 from allennlp.common.util import lazy_groups_of
 from allennlp.data.token_indexers import SingleIdTokenIndexer
 
-sys.path.append("..")
+sys.path.append("..")  # noqa
 import utils
 import attacks
+
 
 # Simple LSTM classifier that uses the final hidden state to classify Sentiment. Based on AllenNLP
 class LstmClassifier(Model):
@@ -85,7 +85,7 @@ def main():
 
     # Load word2vec vectors
     elif EMBEDDING_TYPE == "w2v":
-        embedding_path = "https://dl.fbaipublicfiles.com/fasttext/vectors-english/crawl-300d-2M.vec.zip"
+        embedding_path = "https://dl.fbaipublicfiles.com/fasttext/vectors-english/crawl-300d-2M.vec.zip"  # noqa
         weight = _read_pretrained_embeddings_file(
             embedding_path, embedding_dim=300, vocab=vocab, namespace="tokens"
         )
@@ -141,8 +141,8 @@ def main():
     if torch.cuda.is_available():
         model.train().cuda()  # rnn cannot do backwards in train mode
 
-    # Register a gradient hook on the embeddings. This saves the gradient w.r.t. the word embeddings.
-    # We use the gradient later in the attack.
+    # Register a gradient hook on the embeddings. This saves the gradient w.r.t. the word
+    # embeddings. We use the gradient later in the attack.
     utils.add_hooks(model)
     embedding_weight = utils.get_embedding_weight(
         model

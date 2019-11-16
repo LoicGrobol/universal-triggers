@@ -15,9 +15,7 @@ import utils
 def get_embedding_weight(language_model):
     for module in language_model.modules():
         if isinstance(module, torch.nn.Embedding):
-            if (
-                module.weight.shape[0] == 50257
-            ):  # only add a hook to wordpiece embeddings, not position embeddings
+            if module.weight.shape[0] == 50257:
                 return module.weight.detach()
 
 
@@ -25,9 +23,8 @@ def get_embedding_weight(language_model):
 def add_hooks(language_model):
     for module in language_model.modules():
         if isinstance(module, torch.nn.Embedding):
-            if (
-                module.weight.shape[0] == 50257
-            ):  # only add a hook to wordpiece embeddings, not position
+            # only add a hook to wordpiece embeddings, not position
+            if module.weight.shape[0] == 50257:
                 module.weight.requires_grad = True
                 module.register_backward_hook(utils.extract_grad_hook)
 
@@ -167,9 +164,8 @@ def run_model():
             for token_to_flip in tqdm.trange(
                 0, trigger_token_length, desc="Hotflipping tokens", unit="token"
             ):
-                if (
-                    end_iter
-                ):  # no loss improvement over whole sweep -> continue to new random restart
+                # no loss improvement over whole sweep -> continue to new random restart
+                if end_iter:
                     continue
 
                 # Get average gradient w.r.t. the triggers
@@ -186,7 +182,7 @@ def run_model():
                 )[0]
 
                 # try all the candidates and pick the best
-                curr_best_loss = 999999
+                curr_best_loss = float("inf")
                 curr_best_trigger_tokens = None
                 for cand in tqdm.tqdm(
                     candidates,
@@ -212,7 +208,11 @@ def run_model():
                 # Update overall best if the best current candidate is better
                 if curr_best_loss < best_loss:
                     counter = 0  # used to exit early if no improvements in the trigger
+                    delta = (best_loss - curr_best_loss).item()
                     best_loss = curr_best_loss
+                    tqdm.write(
+                        f"Flipping {trigger_tokens[token_to_flip]} → {curr_best_trigger_tokens[token_to_flip]} (Δ={delta})"
+                    )
                     trigger_tokens = deepcopy(curr_best_trigger_tokens)
                     tqdm.tqdm.write(f"Loss: {best_loss.data.item()}")
                     tqdm.tqdm.write(

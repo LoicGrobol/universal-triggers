@@ -2,6 +2,8 @@
 Contains different methods for attacking models. In particular, given the gradients for token
 embeddings, it computes the optimal token replacements. This code runs on CPU.
 """
+from typing import Optional
+
 import torch
 import torch.jit
 import numpy
@@ -14,6 +16,7 @@ def hotflip_attack(
     embedding_matrix,
     increase_loss: bool = False,
     num_candidates: int = 1,
+    blacklisted_ids: Optional[torch.Tensor] = None,
 ):
     """
     The "Hotflip" attack described in Equation (2) of the paper. This code is heavily inspired by
@@ -29,18 +32,21 @@ def hotflip_attack(
     decrease the loss of the target class (increase_loss=False).
     """
     # We do not need the term in `$e_{\text{adv}ᵢ}$` since it is independant of `$eᵢ'$`
-    averaged_grad = averaged_grad.unsqueeze(0)
     gradient_dot_embedding_matrix = torch.einsum(
-        "bij,kj->bik", (averaged_grad, embedding_matrix)
+        "ij,kj->ik", (averaged_grad, embedding_matrix)
     )
     if not increase_loss:
         # lower versus increase the class probability.
         gradient_dot_embedding_matrix *= -1
+    if blacklisted_ids is not None:
+        # FIXME: should not be needed anymore
+        blacklisted_ids_t = torch.jit._unwrap_optional(blacklisted_ids)
+        gradient_dot_embedding_matrix[:, blacklisted_ids_t] = torch.tensor(-1e32)
     if num_candidates > 1:  # get top k options
-        best_k_ids = torch.topk(gradient_dot_embedding_matrix, num_candidates, dim=2)[1]
-        return best_k_ids[0]
-    best_at_each_step = gradient_dot_embedding_matrix.argmax(dim=2)
-    return best_at_each_step[0]
+        best_k_ids = torch.topk(gradient_dot_embedding_matrix, num_candidates, dim=1)[1]
+        return best_k_ids
+    best_at_each_step = gradient_dot_embedding_matrix.argmax(dim=1)
+    return best_at_each_step
 
 
 def random_attack(embedding_matrix, trigger_token_ids, num_candidates=1):

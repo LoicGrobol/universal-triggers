@@ -10,8 +10,8 @@ import numpy
 def hotflip_attack(
     averaged_grad,
     embedding_matrix,
-    increase_loss=False,
-    num_candidates=1,
+    increase_loss: bool = False,
+    num_candidates: int = 1,
 ):
     """
     The "Hotflip" attack described in Equation (2) of the paper. This code is heavily inspired by
@@ -27,18 +27,19 @@ def hotflip_attack(
     decrease the loss of the target class (increase_loss=False).
     """
     # We do not need the term in `$e_{\text{adv}ᵢ}$` since it is independant of `$eᵢ'$`
-    averaged_grad = averaged_grad.unsqueeze(0)
-    gradient_dot_embedding_matrix = torch.einsum(
-        "bij,kj->bik", (averaged_grad, embedding_matrix)
-    )
-    if not increase_loss:
-        # lower versus increase the class probability.
-        gradient_dot_embedding_matrix *= -1
-    if num_candidates > 1:  # get top k options
-        best_k_ids = torch.topk(gradient_dot_embedding_matrix, num_candidates, dim=2)[1]
-        return best_k_ids.detach()[0]
-    best_at_each_step = gradient_dot_embedding_matrix.argmax(dim=2)
-    return best_at_each_step.detach()[0]
+    with torch.no_grad():
+        averaged_grad = averaged_grad.unsqueeze(0)
+        gradient_dot_embedding_matrix = torch.einsum(
+            "bij,kj->bik", (averaged_grad, embedding_matrix)
+        )
+        if not increase_loss:
+            # lower versus increase the class probability.
+            gradient_dot_embedding_matrix *= -1
+        if num_candidates > 1:  # get top k options
+            best_k_ids = torch.topk(gradient_dot_embedding_matrix, num_candidates, dim=2)[1]
+            return best_k_ids.detach()[0]
+        best_at_each_step = gradient_dot_embedding_matrix.argmax(dim=2)
+        return best_at_each_step.detach()[0]
 
 
 def random_attack(embedding_matrix, trigger_token_ids, num_candidates=1):

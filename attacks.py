@@ -26,6 +26,7 @@ def hotflip_attack(
     the loss (decrease the model's probability of the true class). For targeted attacks, you want to
     decrease the loss of the target class (increase_loss=False).
     """
+    # We do not need the term in `$e_{\text{adv}ᵢ}$` since it is independant of `$eᵢ'$`
     averaged_grad = averaged_grad.unsqueeze(0)
     gradient_dot_embedding_matrix = torch.einsum(
         "bij,kj->bik", (averaged_grad, embedding_matrix)

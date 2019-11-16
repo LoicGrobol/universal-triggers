@@ -1,5 +1,4 @@
 import sys
-from sklearn.neighbors import KDTree
 from allennlp.data.dataset_readers.snli import SnliReader
 from allennlp.common.util import lazy_groups_of
 from allennlp.data.token_indexers import SingleIdTokenIndexer
@@ -7,7 +6,7 @@ from allennlp.models import load_archive
 from allennlp.data.tokenizers import WordTokenizer
 from allennlp.data.iterators import BasicIterator
 
-sys.path.append("..")
+sys.path.append("..")  # noqa
 import utils
 import attacks
 

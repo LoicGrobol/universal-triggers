@@ -4,7 +4,7 @@ from allennlp.data.token_indexers import SingleIdTokenIndexer
 from allennlp.models import load_archive
 from allennlp.data.iterators import BasicIterator
 
-sys.path.append("..")
+sys.path.append("..")  # noqa
 import utils
 import squad_utils
 import attacks

@@ -1,14 +1,15 @@
 from copy import deepcopy
 import sys
 import torch
-import torch.nn.functional as F
+import tqdm
 import numpy as np
 from pytorch_transformers import GPT2Tokenizer, GPT2LMHeadModel
 import sample_from_gpt2
 
-sys.path.append("..")
+sys.path.append("..")  # noqa
 import attacks
 import utils
+
 
 # returns the wordpiece embedding weight matrix
 def get_embedding_weight(language_model):
@@ -55,7 +56,8 @@ def get_loss(language_model, batch_size, trigger, target, device="cuda"):
     return loss
 
 
-# creates the batch of target texts with -1 placed at the end of the sequences for padding (for masking out the loss).
+# creates the batch of target texts with -1 placed at the end of the sequences for padding (for
+# masking out the loss).
 def make_target_batch(tokenizer, device, target_texts):
     # encode items and get the max length
     encoded_texts = []
@@ -142,14 +144,15 @@ def run_model():
     # batch and pad the target tokens
     target_tokens = make_target_batch(tokenizer, device, target_texts)
 
-    for _ in range(10):  # different random restarts of the trigger
+    # different random restarts of the trigger
+    for _ in tqdm.trange(10, unit="restart", desc="Generating triggers"):
         total_vocab_size = 50257  # total number of subword pieces in the GPT-2 model
         trigger_token_length = 6  # how many subword pieces in the trigger
         batch_size = target_tokens.shape[0]
 
         # sample random initial trigger
         trigger_tokens = np.random.randint(total_vocab_size, size=trigger_token_length)
-        print(tokenizer.decode(trigger_tokens))
+        tqdm.tqdm.write(f"Trigger initialization: {tokenizer.decode(trigger_tokens)!r}")
 
         # get initial loss for the trigger
         model.zero_grad()
@@ -158,10 +161,12 @@ def run_model():
         counter = 0
         end_iter = False
 
-        for _ in range(50):  # this many updates of the entire trigger sequence
-            for token_to_flip in range(
-                0, trigger_token_length
-            ):  # for each token in the trigger
+        # this many updates of the entire trigger sequence
+        for _ in tqdm.trange(50, unit="sweep", desc="Refining trigger"):
+            # for each token in the trigger
+            for token_to_flip in tqdm.trange(
+                0, trigger_token_length, desc="Hotflipping tokens", unit="token"
+            ):
                 if (
                     end_iter
                 ):  # no loss improvement over whole sweep -> continue to new random restart
@@ -184,7 +189,11 @@ def run_model():
                 # try all the candidates and pick the best
                 curr_best_loss = 999999
                 curr_best_trigger_tokens = None
-                for cand in candidates:
+                for cand in tqdm.tqdm(
+                    candidates,
+                    unit="candidates",
+                    desc=f"Improving token {token_to_flip}",
+                ):
                     # replace one token with new candidate
                     candidate_trigger_tokens = deepcopy(trigger_tokens)
                     candidate_trigger_tokens[token_to_flip] = cand
@@ -206,11 +215,13 @@ def run_model():
                     counter = 0  # used to exit early if no improvements in the trigger
                     best_loss = curr_best_loss
                     trigger_tokens = deepcopy(curr_best_trigger_tokens)
-                    print("Loss: " + str(best_loss.data.item()))
-                    print(tokenizer.decode(trigger_tokens) + "\n")
+                    tqdm.tqdm.write(f"Loss: {best_loss.data.item()}")
+                    tqdm.tqdm.write(
+                        f"Current trigger: {tokenizer.decode(trigger_tokens)}"
+                    )
                 # if you have gone through all trigger_tokens without improvement, end iteration
                 elif counter == len(trigger_tokens):
-                    print("\nNo improvement, ending iteration")
+                    tqdm.tqdm.write("No improvement, ending iteration")
                     end_iter = True
                 # If the loss didn't get better, just move to the next word.
                 else:
@@ -223,8 +234,9 @@ def run_model():
                 )
 
         # Print final trigger and get 10 samples from the model
-        print("Loss: " + str(best_loss.data.item()))
-        print(tokenizer.decode(trigger_tokens))
+        tqdm.tqdm.write("Final trigger: {tokenizer.decode(trigger_tokens)}")
+        tqdm.tqdm.write(f"Loss: {best_loss.data.item()}")
+        tqdm.tqdm.write("Some samples:")
         for _ in range(10):
             out = sample_from_gpt2.sample_sequence(
                 model=model,
@@ -238,8 +250,8 @@ def run_model():
             out = out[:, len(trigger_tokens) :].tolist()
             for i in range(1):
                 text = tokenizer.decode(out[i])
-                print(text)
-        print("=" * 80)
+                tqdm.tqdm.write(text)
+        tqdm.tqdm.write("=" * 80)
 
 
 if __name__ == "__main__":

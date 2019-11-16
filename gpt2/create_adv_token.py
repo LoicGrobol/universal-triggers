@@ -2,7 +2,6 @@ from copy import deepcopy
 import sys
 import torch
 import tqdm
-import numpy as np
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 import sample_from_gpt2
 
@@ -11,16 +10,16 @@ import attacks
 import utils
 
 
-# returns the wordpiece embedding weight matrix
 def get_embedding_weight(language_model):
+    """returns the wordpiece embedding weight matrix"""
     for module in language_model.modules():
         if isinstance(module, torch.nn.Embedding):
             if module.weight.shape[0] == 50257:
                 return module.weight.detach()
 
 
-# add hooks for embeddings
 def add_hooks(language_model):
+    """add hooks for embeddings"""
     for module in language_model.modules():
         if isinstance(module, torch.nn.Embedding):
             # only add a hook to wordpiece embeddings, not position
@@ -29,33 +28,27 @@ def add_hooks(language_model):
                 module.register_backward_hook(utils.extract_grad_hook)
 
 
-# Gets the loss of the target_tokens using the triggers as the context
 def get_loss(language_model, batch_size, trigger, target, device="cuda"):
+    """Get the loss of the target_tokens using the triggers as the context"""
     # context is trigger repeated batch size
-    tensor_trigger = (
-        torch.tensor(trigger, device=device, dtype=torch.long)
-        .unsqueeze(0)
-        .repeat(batch_size, 1)
-    )
-    mask_out = -1 * torch.ones_like(
-        tensor_trigger
-    )  # we zero out the loss for the trigger tokens
-    lm_input = torch.cat(
-        (tensor_trigger, target), dim=1
-    )  # we feed the model the trigger + target texts
-    mask_and_target = torch.cat(
-        (mask_out, target), dim=1
-    )  # has -1's + target texts for loss computation
-    lm_input[
-        lm_input == -1
-    ] = 1  # put random token of 1 at end of context (its masked out)
+    tensor_trigger = trigger.repeat(target.shape[0], 1)
+    # we zero out the loss for the trigger tokens
+    mask_out = -1 * torch.ones_like(tensor_trigger)
+    # we feed the model the trigger + target texts
+    lm_input = torch.cat((tensor_trigger, target), dim=1)
+    # has -1's + target texts for loss computation
+    mask_and_target = torch.cat((mask_out, target), dim=1)
+    # put random token of 1 at end of context (its masked out)
+    lm_input[lm_input == -1] = 1
     loss = language_model(lm_input, labels=mask_and_target)[0]
     return loss
 
 
-# creates the batch of target texts with -1 placed at the end of the sequences for padding (for
-# masking out the loss).
 def make_target_batch(tokenizer, device, target_texts):
+    """
+    creates the batch of target texts with -1 placed at the end of
+    the sequences for padding (for masking out the loss).
+    """
     # encode items and get the max length
     encoded_texts = []
     max_len = 0
@@ -148,8 +141,10 @@ def run_model():
         batch_size = target_tokens.shape[0]
 
         # sample random initial trigger
-        trigger_tokens = np.random.randint(total_vocab_size, size=trigger_token_length)
-        tqdm.tqdm.write(f"Trigger initialization: {tokenizer.decode(trigger_tokens)!r}")
+        trigger_tokens = torch.randint(total_vocab_size, size=(trigger_token_length,))
+        tqdm.tqdm.write(
+            f"Trigger initialization: {tokenizer.decode(trigger_tokens.tolist())!r}"
+        )
 
         # get initial loss for the trigger
         model.zero_grad()
@@ -179,7 +174,7 @@ def run_model():
                     embedding_weight,
                     increase_loss=False,
                     num_candidates=100,
-                )[0]
+                ).squeeze(0)
 
                 # try all the candidates and pick the best
                 curr_best_loss = float("inf")
@@ -210,13 +205,13 @@ def run_model():
                     counter = 0  # used to exit early if no improvements in the trigger
                     delta = (best_loss - curr_best_loss).item()
                     best_loss = curr_best_loss
-                    tqdm.write(
+                    tqdm.tqdm.write(
                         f"Flipping {trigger_tokens[token_to_flip]} → {curr_best_trigger_tokens[token_to_flip]} (Δ={delta})"
                     )
                     trigger_tokens = deepcopy(curr_best_trigger_tokens)
                     tqdm.tqdm.write(f"Loss: {best_loss.data.item()}")
                     tqdm.tqdm.write(
-                        f"Current trigger: {tokenizer.decode(trigger_tokens)}"
+                        f"Current trigger: {tokenizer.decode(trigger_tokens.tolist())}"
                     )
                 # if you have gone through all trigger_tokens without improvement, end iteration
                 elif counter == len(trigger_tokens):
@@ -233,7 +228,7 @@ def run_model():
                 )
 
         # Print final trigger and get 10 samples from the model
-        tqdm.tqdm.write("Final trigger: {tokenizer.decode(trigger_tokens)}")
+        tqdm.tqdm.write(f"Final trigger: {tokenizer.decode(trigger_tokens.tolist())}")
         tqdm.tqdm.write(f"Loss: {best_loss.data.item()}")
         tqdm.tqdm.write("Some samples:")
         for _ in range(10):

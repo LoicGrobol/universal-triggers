@@ -28,7 +28,7 @@ def add_hooks(language_model):
                 module.register_backward_hook(utils.extract_grad_hook)
 
 
-def get_loss(language_model, batch_size, trigger, target, device="cuda"):
+def get_loss(language_model, trigger, target, device="cuda"):
     """Get the loss of the target_tokens using the triggers as the context"""
     # context is trigger repeated batch size
     tensor_trigger = trigger.repeat(target.shape[0], 1)
@@ -38,7 +38,10 @@ def get_loss(language_model, batch_size, trigger, target, device="cuda"):
     lm_input = torch.cat((tensor_trigger, target), dim=1)
     # has -1's + target texts for loss computation
     mask_and_target = torch.cat((mask_out, target), dim=1)
-    # put random token of 1 at end of context (its masked out)
+    # `target` is padded with `-1`s at the end of the sequence dimension. This is good when using
+    # them for labels as `-1` in labels are ignored in the loss. However, in inputs, `-1` is not a
+    # valid id, so we put 1 in their places, which will result in useless embeddings, which should
+    # not be an issue since they won't go in the loss, capisce?
     lm_input[lm_input == -1] = 1
     loss = language_model(lm_input, labels=mask_and_target)[0]
     return loss

@@ -186,8 +186,14 @@ def run_model():
                     counter = 0  # used to exit early if no improvements in the trigger
                     delta = (best_loss - curr_best_loss).item()
                     best_loss = curr_best_loss
+                    previous_token = tokenizer.decode(
+                        [trigger_tokens[token_to_flip].item()]
+                    )
+                    new_token = tokenizer.decode(
+                        [curr_best_trigger_tokens[token_to_flip].item()]
+                    )
                     tqdm.tqdm.write(
-                        f"Flipping {trigger_tokens[token_to_flip]} → {curr_best_trigger_tokens[token_to_flip]} (Δ={delta})"
+                        f"Flipping {previous_token} → {new_token} (Δ={delta})"
                     )
                     trigger_tokens = deepcopy(curr_best_trigger_tokens)
                     tqdm.tqdm.write(f"Loss: {best_loss.data.item()}")

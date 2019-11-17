@@ -118,6 +118,7 @@ def run_model():
 
     # batch and pad the target tokens
     target_tokens = make_target_batch(tokenizer, device, target_texts)
+    tokens_blacklist = torch.tensor(sorted(set(target_tokens.view((-1,)).tolist())))
 
     # different random restarts of the trigger
     for _ in tqdm.trange(10, unit="restart", desc="Generating triggers"):
@@ -159,6 +160,7 @@ def run_model():
                     embedding_weight,
                     increase_loss=False,
                     num_candidates=100,
+                    blacklisted_ids=tokens_blacklist,
                 ).squeeze(0)
 
                 # try all the candidates and pick the best

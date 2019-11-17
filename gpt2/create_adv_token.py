@@ -133,7 +133,7 @@ def run_model():
 
         # get initial loss for the trigger
         model.zero_grad()
-        loss = get_loss(model, batch_size, trigger_tokens, target_tokens, device)
+        loss = get_loss(model, trigger_tokens, target_tokens, device)
         best_loss = loss
         counter = 0
         end_iter = False
@@ -175,11 +175,7 @@ def run_model():
 
                     # get loss, update current best if its lower loss
                     curr_loss = get_loss(
-                        model,
-                        batch_size,
-                        candidate_trigger_tokens,
-                        target_tokens,
-                        device,
+                        model, candidate_trigger_tokens, target_tokens, device
                     )
                     if curr_loss < curr_best_loss:
                         curr_best_loss = curr_loss
@@ -208,9 +204,7 @@ def run_model():
 
                 # reevaluate the best candidate so you can backprop into it at next iteration
                 model.zero_grad()
-                loss = get_loss(
-                    model, batch_size, trigger_tokens, target_tokens, device
-                )
+                loss = get_loss(model, trigger_tokens, target_tokens, device)
 
         # Print final trigger and get 10 samples from the model
         tqdm.tqdm.write(f"Final trigger: {tokenizer.decode(trigger_tokens.tolist())}")

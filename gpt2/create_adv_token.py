@@ -51,29 +51,11 @@ def make_target_batch(tokenizer, device, target_texts):
     """
     # encode items and get the max length
     encoded_texts = []
-    max_len = 0
     for target_text in target_texts:
-        encoded_target_text = tokenizer.encode(target_text)
+        encoded_target_text = torch.tensor(tokenizer.encode(target_text), device=device)
         encoded_texts.append(encoded_target_text)
-        if len(encoded_target_text) > max_len:
-            max_len = len(encoded_target_text)
-
-    # pad tokens, i.e., append -1 to the end of the non-longest ones
-    for indx, encoded_text in enumerate(encoded_texts):
-        if len(encoded_text) < max_len:
-            encoded_texts[indx].extend([-1] * (max_len - len(encoded_text)))
-
-    # convert to tensors and batch them up
-    target_tokens_batch = None
-    for encoded_text in encoded_texts:
-        target_tokens = torch.tensor(
-            encoded_text, device=device, dtype=torch.long
-        ).unsqueeze(0)
-        if target_tokens_batch is None:
-            target_tokens_batch = target_tokens
-        else:
-            target_tokens_batch = torch.cat((target_tokens, target_tokens_batch), dim=0)
-    return target_tokens_batch
+    
+    return torch.nn.utils.rnn.pad_sequence(encoded_texts, padding_value=-1)
 
 
 def run_model():

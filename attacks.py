@@ -9,6 +9,7 @@ import torch.jit
 import numpy
 
 
+# TODO: docstring average grad is steps×ids dimensional, in gpt2 there is only one step but could be more
 @torch.no_grad()
 @torch.jit.script
 def hotflip_attack(
@@ -23,9 +24,8 @@ def hotflip_attack(
     the nice code of Paul Michel here
     <https://github.com/pmichel31415/translate/blob/paul/pytorch_translate/research/adversarial/adversaries/brute_force_adversary.py>
 
-    This function takes in the model's average_grad over a batch of examples, the model's token
-    embedding matrix, and the current trigger token IDs. It returns the top token candidates for
-    each position.
+    This function takes in the model's average_grad over a batch of examples and the model's token
+    embedding matrix. It returns the top token candidates for each position.
 
     If increase_loss=True, then the attack reverses the sign of the gradient and tries to increase
     the loss (decrease the model's probability of the true class). For targeted attacks, you want to
@@ -41,7 +41,7 @@ def hotflip_attack(
     if blacklisted_ids is not None:
         # FIXME: should not be needed anymore
         blacklisted_ids_t = torch.jit._unwrap_optional(blacklisted_ids)
-        gradient_dot_embedding_matrix[:, blacklisted_ids_t] = torch.tensor(-1e32)
+        gradient_dot_embedding_matrix[:, blacklisted_ids_t] = torch.tensor(-1e32, dtype=torch.float)
     if num_candidates > 1:  # get top k options
         best_k_ids = torch.topk(gradient_dot_embedding_matrix, num_candidates, dim=1)[1]
         return best_k_ids

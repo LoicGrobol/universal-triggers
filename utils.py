@@ -16,9 +16,10 @@ from allennlp.modules.text_field_embedders import TextFieldEmbedder
 @dataclasses.dataclass
 class ValueWrapper:
     """A wrapper to get values from callbacks
-    
+
     This is slightly slower than using a list, but come on, doesn't it feel better?
     """
+
     value: typing.Any = None
 
 
@@ -43,10 +44,10 @@ def extract_grad_hook(module, grad_in, grad_out):
 
 def observe_output_grad(module: torch.nn.Module):
     wrapper = ValueWrapper()
-    
+
     def hook(m, grad_in, grad_out):
         wrapper.value = grad_out[0]
-    
+
     module.register_backward_hook(hook)
     return wrapper
 
@@ -79,9 +80,7 @@ def evaluate_batch(model, batch, trigger_token_ids=None, snli=False):
         return None
     else:
         trigger_sequence_tensor = torch.LongTensor(deepcopy(trigger_token_ids))
-        trigger_sequence_tensor = trigger_sequence_tensor.repeat(
-            len(batch["label"]), 1
-        )
+        trigger_sequence_tensor = trigger_sequence_tensor.repeat(len(batch["label"]), 1)
         if torch.cuda.is_available():
             trigger_sequence_tensor = trigger_sequence_tensor.cuda()
         if snli:
@@ -114,9 +113,7 @@ def get_average_grad(model, batch, trigger_token_ids, target_label=None, snli=Fa
     original_labels = batch[0]["label"].clone()
     if target_label is not None:
         # set the labels equal to the target (backprop from the target class, not model prediction)
-        batch[0]["label"] = (
-            int(target_label) * torch.ones_like(batch[0]["label"])
-        )
+        batch[0]["label"] = int(target_label) * torch.ones_like(batch[0]["label"])
         if torch.cuda.is_available:
             batch[0]["label"] = batch[0]["label"].cuda()
     global extracted_grads

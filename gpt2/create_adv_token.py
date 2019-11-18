@@ -10,24 +10,6 @@ import attacks
 import utils
 
 
-def get_embedding_weight(language_model):
-    """returns the wordpiece embedding weight matrix"""
-    for module in language_model.modules():
-        if isinstance(module, torch.nn.Embedding):
-            if module.weight.shape[0] == 50257:
-                return module.weight.detach()
-
-
-def add_hooks(language_model):
-    """add hooks for embeddings"""
-    for module in language_model.modules():
-        if isinstance(module, torch.nn.Embedding):
-            # only add a hook to wordpiece embeddings, not position
-            if module.weight.shape[0] == 50257:
-                module.weight.requires_grad = True
-                module.register_backward_hook(utils.extract_grad_hook)
-
-
 def get_loss(language_model, trigger, target, device="cuda"):
     """Get the loss of the target_tokens using the triggers as the context"""
     # context is trigger repeated batch size
@@ -57,8 +39,10 @@ def make_target_batch(tokenizer, device, target_texts):
     for target_text in target_texts:
         encoded_target_text = torch.tensor(tokenizer.encode(target_text), device=device)
         encoded_texts.append(encoded_target_text)
-    
-    return torch.nn.utils.rnn.pad_sequence(encoded_texts, padding_value=-1)
+
+    return torch.nn.utils.rnn.pad_sequence(
+        encoded_texts, padding_value=-1, batch_first=True
+    )
 
 
 def run_model():
@@ -72,8 +56,11 @@ def run_model():
     model.eval()
     model.to(device)
 
-    add_hooks(model)  # add gradient hooks to embeddings
-    embedding_weight = get_embedding_weight(model)  # save the word embedding matrix
+    token_embedding_layer = model.transformer.wte
+    embedding_weight = token_embedding_layer.weight  # save the word embedding matrix
+    embedding_weight.requires_grad = True
+    embedding_weight = embedding_weight.detach()
+    embeddings_grad = utils.observe_output_grad(token_embedding_layer)
 
     # Warning. the below contains extremely offensive content.
     # Create a batch of targets you'd like to increase the likelihood of.
@@ -118,13 +105,11 @@ def run_model():
 
     # batch and pad the target tokens
     target_tokens = make_target_batch(tokenizer, device, target_texts)
-    tokens_blacklist = torch.tensor(sorted(set(target_tokens.view((-1,)).tolist())))
 
     # different random restarts of the trigger
     for _ in tqdm.trange(10, unit="restart", desc="Generating triggers"):
         total_vocab_size = 50257  # total number of subword pieces in the GPT-2 model
         trigger_token_length = 6  # how many subword pieces in the trigger
-        batch_size = target_tokens.shape[0]
 
         # sample random initial trigger
         trigger_tokens = torch.randint(total_vocab_size, size=(trigger_token_length,))
@@ -140,6 +125,9 @@ def run_model():
         end_iter = False
 
         # this many updates of the entire trigger sequence
+        # TODO: split out the token flipping function (that return k candidat flips, but maybe reduce k)
+        # TODO: when that's done, instead of keeping only the best flip, keep the n best at each step
+        # TODO: sweep sweep sweep ideally we'd have k×n=100 so that this doesn't add computational cost
         for _ in tqdm.trange(50, unit="sweep", desc="Refining trigger"):
             # for each token in the trigger
             for token_to_flip in tqdm.trange(
@@ -150,9 +138,15 @@ def run_model():
                     continue
 
                 # Get average gradient w.r.t. the triggers
+                # Save memory
                 loss.backward()
-                averaged_grad = torch.sum(utils.extracted_grads[-1], dim=0)
-                averaged_grad = averaged_grad[token_to_flip].unsqueeze(0)
+                grad_at_token_for_each_sample_in_batch = embeddings_grad.value[
+                    :, token_to_flip, :
+                ]
+                averaged_grad = torch.sum(grad_at_token_for_each_sample_in_batch, dim=0)
+                # Hotflip works simultaneously on several positions, but we already know which token
+                # we are flipping
+                averaged_grad = averaged_grad.unsqueeze(0)
 
                 # Use hotflip (linear approximation) attack to get the top num_candidates
                 candidates = attacks.hotflip_attack(
@@ -160,10 +154,10 @@ def run_model():
                     embedding_weight,
                     increase_loss=False,
                     num_candidates=100,
-                    blacklisted_ids=tokens_blacklist,
                 ).squeeze(0)
 
                 # try all the candidates and pick the best
+                # TODO: either batch or jit this because it is dead slow
                 curr_best_loss = float("inf")
                 curr_best_trigger_tokens = None
                 for cand in tqdm.tqdm(

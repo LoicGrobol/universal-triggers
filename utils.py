@@ -1,3 +1,6 @@
+import dataclasses
+import typing
+
 from operator import itemgetter
 from copy import deepcopy
 import heapq
@@ -8,6 +11,15 @@ from allennlp.common.util import lazy_groups_of
 from allennlp.data.iterators import BucketIterator
 from allennlp.nn.util import move_to_device
 from allennlp.modules.text_field_embedders import TextFieldEmbedder
+
+
+@dataclasses.dataclass
+class ValueWrapper:
+    """A wrapper to get values from callbacks
+    
+    This is slightly slower than using a list, but come on, doesn't it feel better?
+    """
+    value: typing.Any = None
 
 
 def get_embedding_weight(model):
@@ -27,6 +39,16 @@ extracted_grads = []
 
 def extract_grad_hook(module, grad_in, grad_out):
     extracted_grads.append(grad_out[0])
+
+
+def observe_output_grad(module: torch.nn.Module):
+    wrapper = ValueWrapper()
+    
+    def hook(m, grad_in, grad_out):
+        wrapper.value = grad_out[0]
+    
+    module.register_backward_hook(hook)
+    return wrapper
 
 
 def add_hooks(model):
@@ -155,7 +177,7 @@ def get_accuracy(model, dev_dataset, vocab, trigger_token_ids=None, snli=False):
 def get_best_candidates(
     model, batch, trigger_token_ids, cand_trigger_token_ids, snli=False, beam_size=1
 ):
-    """"
+    """
     Given the list of candidate trigger token ids (of number of trigger words by number of
     candidates per word), it finds the best new candidate trigger.
     This performs beam search in a left to right fashion.

@@ -9,7 +9,8 @@ import torch.jit
 import numpy
 
 
-# TODO: docstring average grad is steps×ids dimensional, in gpt2 there is only one step but could be more
+# TODO: docstring average grad is steps×ids dimensional, in gpt2 there is only one step but could be
+# more
 @torch.no_grad()
 @torch.jit.script
 def hotflip_attack(
@@ -31,7 +32,8 @@ def hotflip_attack(
     the loss (decrease the model's probability of the true class). For targeted attacks, you want to
     decrease the loss of the target class (increase_loss=False).
     """
-    # We do not need the term in `$e_{\text{adv}ᵢ}$` since it is independant of `$eᵢ'$`
+    # The result is of size seq_len×voc_size and the (i,k) coef is the (approximated) loss for using
+    # the token with id k in position i while keeping the rest of the sequence constant
     gradient_dot_embedding_matrix = torch.einsum(
         "ij,kj->ik", (averaged_grad, embedding_matrix)
     )

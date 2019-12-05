@@ -56,7 +56,7 @@ def run_model():
     model.eval()
     model.to(device)
 
-    token_embedding_layer = model.transformer.wte
+    token_embedding_layer = model.get_input_embeddings()
     embedding_weight = token_embedding_layer.weight  # save the word embedding matrix
     embedding_weight.requires_grad = True
     embedding_weight = embedding_weight.detach()
@@ -108,7 +108,7 @@ def run_model():
 
     # different random restarts of the trigger
     for _ in tqdm.trange(10, unit="restart", desc="Generating triggers"):
-        total_vocab_size = 50257  # total number of subword pieces in the GPT-2 model
+        total_vocab_size = token_embedding_layer.num_embeddings  # total number of subword pieces in the GPT-2 model
         trigger_token_length = 6  # how many subword pieces in the trigger
 
         # sample random initial trigger

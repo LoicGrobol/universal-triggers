@@ -41,11 +41,15 @@ def get_loss(
         labels_lst.append(torch.cat((mask_out, target), dim=1))
     inpts = torch.cat(inpts_lst, dim=0)
     logits_lst = (
-        language_model(inpts).view(len(labels_lst), *labels_lst[0].shape, -1).unbind(0)
+        language_model(inpts)[0]
+        .view(len(labels_lst), *labels_lst[0].shape, -1)
+        .unbind(0)
     )
     loss = [
         torch.nn.functional.cross_entropy(
-            logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
+            logits[..., :-1, :].reshape(-1, logits.shape[-1]),
+            labels[..., 1:].reshape(-1),
+            ignore_index=-1
         )
         for logits, labels in zip(logits_lst, labels_lst)
     ]

@@ -13,7 +13,7 @@ import utils
 def get_loss(language_model, trigger, target, device="cuda"):
     """Get the loss of the target_tokens using the triggers as the context"""
     # context is trigger repeated batch size
-    tensor_trigger = trigger.repeat(target.shape[0], 1)
+    tensor_trigger = trigger.unsqueeze(0).expand(target.shape[0], trigger.shape[0])
     # we zero out the loss for the trigger tokens
     mask_out = -1 * torch.ones_like(tensor_trigger)
     # we feed the model the trigger + target texts
@@ -108,7 +108,9 @@ def run_model():
 
     # different random restarts of the trigger
     for _ in tqdm.trange(10, unit="restart", desc="Generating triggers"):
-        total_vocab_size = token_embedding_layer.num_embeddings  # total number of subword pieces in the GPT-2 model
+        total_vocab_size = (
+            token_embedding_layer.num_embeddings
+        )  # total number of subword pieces in the GPT-2 model
         trigger_token_length = 6  # how many subword pieces in the trigger
 
         # sample random initial trigger
@@ -192,9 +194,9 @@ def run_model():
                         f"Flipping {previous_token} → {new_token} (Δ={delta})"
                     )
                     trigger_tokens = deepcopy(curr_best_trigger_tokens)
-                    tqdm.tqdm.write(f"Loss: {best_loss.data.item()}")
                     tqdm.tqdm.write(
                         f"Current trigger: {tokenizer.decode(trigger_tokens.tolist())}"
+                        f" (Loss: {best_loss.data.item()})"
                     )
                 # if you have gone through all trigger_tokens without improvement, end iteration
                 elif counter == len(trigger_tokens):

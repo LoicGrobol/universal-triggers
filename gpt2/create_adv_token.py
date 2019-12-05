@@ -18,41 +18,45 @@ import utils
 def get_loss(
     language_model: GPT2LMHeadModel,
     triggers: Iterable[torch.Tensor],
-    target: torch.Tensor,
+    targets: torch.Tensor,
     device="cuda",
-) -> List[torch.Tensor]:
+) -> torch.Tensor:
     """Get the loss of the target_tokens using the triggers as the context"""
     inpts_lst = []
-    labels_lst = []
     for trigger in triggers:
         # context is trigger repeated batch size
-        tensor_trigger = trigger.unsqueeze(0).expand(target.shape[0], trigger.shape[0])
+        tensor_trigger = trigger.unsqueeze(0).expand(targets.shape[0], trigger.shape[0])
         # we feed the model the trigger + target texts
-        lm_input = torch.cat((tensor_trigger, target), dim=1)
+        lm_input = torch.cat((tensor_trigger, targets), dim=1)
         # `target` is padded with `-1`s at the end of the sequence dimension. This is good when using
         # them for labels as `-1` in labels are ignored in the loss. However, in inputs, `-1` is not a
         # valid id, so we put 1 in their places, which will result in useless embeddings, which should
         # not be an issue since they won't go in the loss, capisce?
         lm_input[lm_input == -1] = 1
         inpts_lst.append(lm_input)
-        # we zero out the loss for the trigger tokens
-        mask_out = -1 * torch.ones_like(tensor_trigger)
-        # has -1's + target texts for loss computation
-        labels_lst.append(torch.cat((mask_out, target), dim=1))
     inpts = torch.cat(inpts_lst, dim=0)
+    triggers_length = inpts.shape[1] - targets.shape[1]
+    # For each trigger, we extract the probability of each target token given the trigger and the
+    # preceeding target tokens
     logits_lst = (
-        language_model(inpts)[0]
-        .view(len(labels_lst), *labels_lst[0].shape, -1)
+        language_model(inpts)[0][:, triggers_length - 1 : -1, :]
+        .reshape(len(inpts_lst), *targets.shape, -1)
         .unbind(0)
     )
-    loss = [
-        torch.nn.functional.cross_entropy(
-            logits[..., :-1, :].reshape(-1, logits.shape[-1]),
-            labels[..., 1:].reshape(-1),
-            ignore_index=-1
-        )
-        for logits, labels in zip(logits_lst, labels_lst)
-    ]
+
+    # Avoid recomputing it for each trigger
+    flat_targets = targets.reshape(-1)
+    loss = torch.stack(
+        [
+            torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.shape[-1]),
+                flat_targets,
+                ignore_index=-1,
+            )
+            for logits in logits_lst
+        ],
+        dim=0,
+    )
     return loss
 
 
@@ -149,7 +153,7 @@ def run_model():
         # get initial loss for the trigger
         model.zero_grad()
         loss = get_loss(model, [trigger_tokens], target_tokens, device)[0]
-        best_loss = loss
+        best_loss = loss.detach()
         counter = 0
         end_iter = False
 
@@ -183,35 +187,25 @@ def run_model():
                     averaged_grad,
                     embedding_weight,
                     increase_loss=False,
-                    num_candidates=100,
+                    num_candidates=25,
                 ).squeeze(0)
 
                 # try all the candidates and pick the best
-                # TODO: either batch or jit this because it is dead slow
-                curr_best_loss = float("inf")
-                curr_best_trigger_tokens = None
-                for cand in tqdm.tqdm(
-                    candidates,
-                    unit="candidates",
-                    desc=f"Improving token {token_to_flip}",
-                ):
-                    # replace one token with new candidate
-                    candidate_trigger_tokens = deepcopy(trigger_tokens)
-                    candidate_trigger_tokens[token_to_flip] = cand
-
-                    # get loss, update current best if its lower loss
+                candidate_triggers = [deepcopy(trigger_tokens) for cand in candidates]
+                for triggers, cand in zip(candidate_triggers, candidates):
+                    triggers[token_to_flip] = cand
+                with torch.no_grad():
                     curr_loss = get_loss(
-                        model, [candidate_trigger_tokens], target_tokens, device
-                    )[0]
-                    if curr_loss < curr_best_loss:
-                        curr_best_loss = curr_loss
-                        curr_best_trigger_tokens = deepcopy(candidate_trigger_tokens)
+                        model, candidate_triggers, target_tokens, device
+                    )
+                    curr_best_loss, curr_best_loss_indice = curr_loss.min(dim=0)
 
                 # Update overall best if the best current candidate is better
                 if curr_best_loss < best_loss:
                     counter = 0  # used to exit early if no improvements in the trigger
                     delta = (best_loss - curr_best_loss).item()
                     best_loss = curr_best_loss
+                    curr_best_trigger_tokens = candidate_triggers[curr_best_loss_indice]
                     previous_token = tokenizer.decode(
                         [trigger_tokens[token_to_flip].item()]
                     )

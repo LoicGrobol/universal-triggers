@@ -1,8 +1,13 @@
 from copy import deepcopy
 import sys
+from typing import Iterable, List
+
 import torch
+import torch.jit
+import torch.nn
 import tqdm
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
+
 import sample_from_gpt2
 
 sys.path.append("..")  # noqa
@@ -10,22 +15,40 @@ import attacks
 import utils
 
 
-def get_loss(language_model, trigger, target, device="cuda"):
+def get_loss(
+    language_model: GPT2LMHeadModel,
+    triggers: Iterable[torch.Tensor],
+    target: torch.Tensor,
+    device="cuda",
+) -> List[torch.Tensor]:
     """Get the loss of the target_tokens using the triggers as the context"""
-    # context is trigger repeated batch size
-    tensor_trigger = trigger.unsqueeze(0).expand(target.shape[0], trigger.shape[0])
-    # we zero out the loss for the trigger tokens
-    mask_out = -1 * torch.ones_like(tensor_trigger)
-    # we feed the model the trigger + target texts
-    lm_input = torch.cat((tensor_trigger, target), dim=1)
-    # has -1's + target texts for loss computation
-    mask_and_target = torch.cat((mask_out, target), dim=1)
-    # `target` is padded with `-1`s at the end of the sequence dimension. This is good when using
-    # them for labels as `-1` in labels are ignored in the loss. However, in inputs, `-1` is not a
-    # valid id, so we put 1 in their places, which will result in useless embeddings, which should
-    # not be an issue since they won't go in the loss, capisce?
-    lm_input[lm_input == -1] = 1
-    loss = language_model(lm_input, labels=mask_and_target)[0]
+    inpts_lst = []
+    labels_lst = []
+    for trigger in triggers:
+        # context is trigger repeated batch size
+        tensor_trigger = trigger.unsqueeze(0).expand(target.shape[0], trigger.shape[0])
+        # we feed the model the trigger + target texts
+        lm_input = torch.cat((tensor_trigger, target), dim=1)
+        # `target` is padded with `-1`s at the end of the sequence dimension. This is good when using
+        # them for labels as `-1` in labels are ignored in the loss. However, in inputs, `-1` is not a
+        # valid id, so we put 1 in their places, which will result in useless embeddings, which should
+        # not be an issue since they won't go in the loss, capisce?
+        lm_input[lm_input == -1] = 1
+        inpts_lst.append(lm_input)
+        # we zero out the loss for the trigger tokens
+        mask_out = -1 * torch.ones_like(tensor_trigger)
+        # has -1's + target texts for loss computation
+        labels_lst.append(torch.cat((mask_out, target), dim=1))
+    inpts = torch.cat(inpts_lst, dim=0)
+    logits_lst = (
+        language_model(inpts).view(len(labels_lst), *labels_lst[0].shape, -1).unbind(0)
+    )
+    loss = [
+        torch.nn.functional.cross_entropy(
+            logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
+        )
+        for logits, labels in zip(logits_lst, labels_lst)
+    ]
     return loss
 
 
@@ -121,15 +144,16 @@ def run_model():
 
         # get initial loss for the trigger
         model.zero_grad()
-        loss = get_loss(model, trigger_tokens, target_tokens, device)
+        loss = get_loss(model, [trigger_tokens], target_tokens, device)[0]
         best_loss = loss
         counter = 0
         end_iter = False
 
         # this many updates of the entire trigger sequence
-        # TODO: split out the token flipping function (that return k candidat flips, but maybe reduce k)
-        # TODO: when that's done, instead of keeping only the best flip, keep the n best at each step
-        # TODO: sweep sweep sweep ideally we'd have k×n=100 so that this doesn't add computational cost
+        # TODO: Beam search plan
+        #   - [ ] split out the token flipping function (that return k candidat flips, but maybe reduce k)
+        #   - [ ] when that's done, instead of keeping only the best flip, keep the n best at each step
+        #   - [ ] sweep sweep sweep ideally we'd have k×n=100 so that this doesn't add computational cost
         for _ in tqdm.trange(50, unit="sweep", desc="Refining trigger"):
             # for each token in the trigger
             for token_to_flip in tqdm.trange(
@@ -173,8 +197,8 @@ def run_model():
 
                     # get loss, update current best if its lower loss
                     curr_loss = get_loss(
-                        model, candidate_trigger_tokens, target_tokens, device
-                    )
+                        model, [candidate_trigger_tokens], target_tokens, device
+                    )[0]
                     if curr_loss < curr_best_loss:
                         curr_best_loss = curr_loss
                         curr_best_trigger_tokens = deepcopy(candidate_trigger_tokens)
@@ -208,7 +232,7 @@ def run_model():
 
                 # reevaluate the best candidate so you can backprop into it at next iteration
                 model.zero_grad()
-                loss = get_loss(model, trigger_tokens, target_tokens, device)
+                loss = get_loss(model, [trigger_tokens], target_tokens, device)[0]
 
         # Print final trigger and get 10 samples from the model
         tqdm.tqdm.write(f"Final trigger: {tokenizer.decode(trigger_tokens.tolist())}")

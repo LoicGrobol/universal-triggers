@@ -1,18 +1,17 @@
-import heapq
 import sys
-from typing import Iterable, List, Tuple
+from typing import Iterable, Optional, List, Tuple
 
 import torch
 import torch.jit
 import torch.nn
 import tqdm
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
+import xheap
 
 import sample_from_gpt2
 
 sys.path.append("..")  # noqa
 import attacks
-import utils
 
 
 def get_loss(
@@ -24,7 +23,7 @@ def get_loss(
     """Get the loss of the target_tokens using the triggers as the context"""
     inpts_lst = []
     for trigger in triggers:
-        # context is trigger repeated batch size
+        # context is trigger repeated once for each target
         tensor_trigger = trigger.unsqueeze(0).expand(targets.shape[0], trigger.shape[0])
         # we feed the model the trigger + target texts
         lm_input = torch.cat((tensor_trigger, targets), dim=1)
@@ -75,45 +74,52 @@ def make_target_batch(tokenizer, device, target_texts):
 
 def get_averaged_grad(
     model: GPT2LMHeadModel,
-    embedding_weight: torch.Tensor,
-    embeddings_grad: utils.ValueWrapper,
     trigger_tokens: torch.Tensor,
     target_tokens: torch.Tensor,
     token_to_flip: int,
     device,
 ):
-    model.zero_grad()
-    # Get average gradient w.r.t. the triggers
-    loss = get_loss(model, [trigger_tokens], target_tokens, device)[0]
+    """Return the gradient of the triger tokens wrt to the loss averaged across all the targets."""
+    trigger_embeddings = (
+        model.get_input_embeddings()(trigger_tokens).detach().requires_grad_(True)
+    )
+    target_inputs = target_tokens.clone()
+    target_inputs[target_inputs == -1] = 1
+    target_embeddings = model.get_input_embeddings()(target_inputs)
+    lm_input = torch.cat(
+        [
+            trigger_embeddings.unsqueeze(0).expand(
+                target_tokens.shape[0], *trigger_embeddings.shape
+            ),
+            target_embeddings,
+        ],
+        dim=1,
+    )
+    lm_output = model(inputs_embeds=lm_input)
+    logits = lm_output[0]
+    target_logits = logits[:, trigger_tokens.shape[0] - 1 : -1, :].reshape(
+        target_inputs.shape[0] * target_inputs.shape[1], -1
+    )
+    loss = torch.nn.functional.cross_entropy(
+        target_logits, target_tokens.view(-1), ignore_index=-1
+    )
     loss.backward()
-    grad_at_token_for_each_sample_in_batch = embeddings_grad.value[
-        :, token_to_flip, :
-    ].detach()
-
-    # Save memory
-    model.zero_grad()
-    return torch.sum(grad_at_token_for_each_sample_in_batch, dim=0)
+    grad_at_token = trigger_embeddings.grad[token_to_flip, :].detach()
+    return grad_at_token
 
 
 def get_best_k_flips(
     model: GPT2LMHeadModel,
     embedding_weight: torch.Tensor,
-    embeddings_grad: utils.ValueWrapper,
     trigger_tokens: torch.Tensor,
     target_tokens: torch.Tensor,
     token_to_flip: int,
     device,
     k: int = 1,
-    max_candidates: int = 50,
+    max_candidates: int = 25,
 ) -> List[Tuple[float, torch.Tensor]]:
     averaged_grad = get_averaged_grad(
-        model,
-        embedding_weight,
-        embeddings_grad,
-        trigger_tokens,
-        target_tokens,
-        token_to_flip,
-        device,
+        model, trigger_tokens, target_tokens, token_to_flip, device
     )
     # Hotflip works simultaneously on several positions, but we already know which token
     # we are flipping
@@ -139,7 +145,7 @@ def get_best_k_flips(
     ]
 
 
-def run_model(trigger_token_length: int = 6, beam_size: int = 10):
+def run_model(trigger_token_length: int = 6, beam_size: int = 4):
     # np.random.seed(0)
     # torch.random.manual_seed(0)
     # torch.cuda.manual_seed(0)
@@ -153,16 +159,14 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
         output_hidden_states=False,
         output_attentions=False,
         output_past=False,
-        # torchscript=True,
+        torchscript=True,
     )
     model.eval()
     model.to(device)
 
     print("Setting up parameters")
     token_embedding_layer = model.get_input_embeddings()
-    embeddings_grad = utils.observe_output_grad(token_embedding_layer)
     embedding_weight = token_embedding_layer.weight  # save the word embedding matrix
-    embedding_weight.requires_grad = True
     embedding_weight = embedding_weight.detach()
 
     # total number of subword pieces in the GPT-2 model
@@ -214,7 +218,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
 
     # different random restarts of the triggers
     for _ in tqdm.trange(10, unit="restart", desc="Generating triggers"):
-        beam = []
+        beam = xheap.OrderHeap(key=lambda x: (-x[0], id(x)))
         for _ in range(beam_size):
             # sample random initial trigger
             trigger_tokens = torch.randint(
@@ -224,16 +228,15 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
             # get initial loss for the trigger
             model.zero_grad()
             with torch.no_grad():
-                best_loss = get_loss(model, [trigger_tokens], target_tokens, device)[
+                loss = get_loss(model, [trigger_tokens], target_tokens, device)[
                     0
                 ].item()
-            beam.append((-best_loss, trigger_tokens))
-        heapq.heapify(beam)
+            beam.push((loss, trigger_tokens))
         worse_loss = -min(beam)[0]
         tqdm.tqdm.write("Initial triggers:")
         for loss, trigger_tokens in beam:
             trigger_str = tokenizer.decode(trigger_tokens.tolist())
-            tqdm.tqdm.write(f"{trigger_str} (Loss: {-loss})")
+            tqdm.tqdm.write(f"{trigger_str} (Loss: {loss})")
         counter = 0
         end_iter = False
 
@@ -245,12 +248,13 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
             for token_to_flip in tqdm.trange(
                 0, trigger_token_length, desc="Hotflipping tokens", unit="token"
             ):
-                next_beam = beam[:]
-                for loss, trigger_tokens in beam:
+                next_beam = xheap.OrderHeap(beam, key=lambda x: (x[0], id(x[1])))
+                for loss, trigger_tokens in tqdm.tqdm(
+                    beam, desc="Fanning out", unit="trigger"
+                ):
                     fan_out = get_best_k_flips(
                         model,
                         embedding_weight,
-                        embeddings_grad,
                         trigger_tokens,
                         target_tokens,
                         token_to_flip,
@@ -258,16 +262,16 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
                         k=beam_size,
                     )
                     for curr_loss, curr_trigger_tokens in fan_out:
-                        heapq.heappushpop(next_beam, (-curr_loss, curr_trigger_tokens))
+                        next_beam.pushpop((curr_loss, curr_trigger_tokens))
                 beam = next_beam
-                curr_worse_loss = -min(beam)[0]
+                curr_worse_loss = beam.peek()[0]
                 # If we have improved something, display and reset the counter
                 if curr_worse_loss < worse_loss:
                     counter = 0  # used to exit early if no improvements in the trigger
                     tqdm.tqdm.write("Improved triggers:")
                     for loss, trigger_tokens in beam:
                         trigger_str = tokenizer.decode(trigger_tokens.tolist())
-                        tqdm.tqdm.write(f"{trigger_str} (Loss: {-loss})")
+                        tqdm.tqdm.write(f"{trigger_str} (Loss: {loss})")
                 # if you have gone through all trigger_tokens without improvement, end iteration
                 elif counter == trigger_tokens.shape[0]:
                     tqdm.tqdm.write("No improvement, ending iteration")
@@ -278,11 +282,11 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
                     counter += 1
 
         # Print final trigger and get 10 samples from the model
-        best_loss, best_trigger_tokens = max(beam)
+        best_loss, best_trigger_tokens = min(beam, key=lambda x: (x[0], id(x[1])))
         tqdm.tqdm.write(
             f"Final triggers: {tokenizer.decode(best_trigger_tokens.tolist())}"
         )
-        tqdm.tqdm.write(f"Loss: {-best_loss}")
+        tqdm.tqdm.write(f"Loss: {best_loss}")
         tqdm.tqdm.write("Some samples:")
         for _ in range(10):
             out = sample_from_gpt2.sample_sequence(
@@ -297,7 +301,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
             out = out[:, trigger_tokens.shape[0] :].tolist()
             for i in range(1):
                 text = tokenizer.decode(out[i])
-                tqdm.tqdm.write(text)
+                tqdm.tqdm.write(text.strip())
         tqdm.tqdm.write("=" * 80)
 
 

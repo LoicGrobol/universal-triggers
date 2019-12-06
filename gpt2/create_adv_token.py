@@ -276,7 +276,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
         for _ in range(beam_size):
             # sample random initial trigger
             trigger_tokens = torch.randint(
-                total_vocab_size, size=(trigger_token_length,)
+                total_vocab_size, size=(trigger_token_length,), device=device
             )
 
             # get initial loss for the trigger
@@ -308,7 +308,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
             ):
                 next_beam = xheap.OrderHeap(beam, key=lambda x: (-x[0], id(x[1])))
                 for loss, trigger_tokens in tqdm.tqdm(
-                    beam, desc="Fanning out", unit="trigger"
+                    beam, desc="Fanning out", unit="trigger", leave=False
                 ):
                     fan_out = get_best_k_flips(
                         model,

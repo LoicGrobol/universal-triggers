@@ -1,5 +1,5 @@
 import sys
-from typing import Iterable, Optional, List, Tuple
+from typing import Callable, Iterable, Optional, List, Tuple
 
 import torch
 import torch.jit
@@ -15,45 +15,79 @@ import attacks
 
 
 def get_loss(
-    language_model: GPT2LMHeadModel,
+    model: GPT2LMHeadModel,
     triggers: Iterable[torch.Tensor],
     targets: torch.Tensor,
     device="cuda",
+    targets_embeddings: Optional[torch.Tensor] = None,
+    fast_lm_loss: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
 ) -> torch.Tensor:
     """Get the loss of the target_tokens using the triggers as the context"""
-    inpts_lst = []
-    for trigger in triggers:
-        # context is trigger repeated once for each target
-        tensor_trigger = trigger.unsqueeze(0).expand(targets.shape[0], trigger.shape[0])
-        # we feed the model the trigger + target texts
-        lm_input = torch.cat((tensor_trigger, targets), dim=1)
+    num_targets = targets.shape[0]
+    max_target_length = targets.shape[1]
+
+    # We use this to pre-compute the input embeddings as we reuse them a lot
+    model_input_embeddings = model.get_input_embeddings()
+    if targets_embeddings is None:
         # `target` is padded with `-1`s at the end of the sequence dimension. This is good when
         # using them for labels as `-1` in labels are ignored in the loss. However, in inputs, `-1`
         # is not a valid id, so we put 1 in their places, which will result in useless embeddings,
         # which should not be an issue since they won't go in the loss, capisce?
-        lm_input[lm_input == -1] = 1
-        inpts_lst.append(lm_input)
+        target_indices_for_embeddings = targets.clone()
+        target_indices_for_embeddings[target_indices_for_embeddings == -1] = 1
+        targets_embeddings = model_input_embeddings(target_indices_for_embeddings)
+
+    inpts_lst = []
+    for trigger in triggers:
+        trigger_embeddings = model_input_embeddings(trigger)
+        # context is trigger repeated once for each target
+        trigger_embeddings_for_each_target = trigger_embeddings.unsqueeze(0).expand(
+            num_targets, *trigger_embeddings.shape
+        )
+        # we feed the model the trigger + target texts
+        lm_input_for_trigger = torch.cat(
+            (trigger_embeddings_for_each_target, targets_embeddings), dim=1
+        )
+        inpts_lst.append(lm_input_for_trigger)
+
+    num_triggers = len(inpts_lst)
+    # This works because we assume all the triggers have the same length
+    seq_length = inpts_lst[0].shape[1]
+    triggers_length = seq_length - max_target_length
+
+    # Running the transformer is slow but not very demanding in memory if properly parametered so we
+    # can run putting all the triggers in a single batch
+    lm_inpt = torch.cat(inpts_lst, dim=0)
+    lm_hidden_states = model.transformer(inputs_embeds=lm_inpt)[0]
+    # We only need the hidden states that will give the logits for the targets, so we extract them
+    # here and reformat if to separate the triggers
+    targets_hiden_states = lm_hidden_states[:, triggers_length - 1 : -1, :].view(
+        num_triggers, num_targets, max_target_length, -1
+    )
 
     # Avoid recomputing it for each trigger
     flat_targets = targets.reshape(-1)
-    loss_lst = []
+    loss = torch.zeros((num_triggers,), dtype=torch.float, device=device)
 
-    for inpt in inpts_lst:
-        lm_output = language_model(inpt)
-        logits = lm_output[0]
-        # For each trigger, we extract the probability of each target token given the trigger and
-        # the preceeding target tokens
-        triggers_length = inpt.shape[1] - targets.shape[1]
-        target_logits = logits[:, triggers_length - 1 : -1, :].reshape(
-            targets.shape[0] * targets.shape[1], -1
-        )
-        loss_lst.append(
-            torch.nn.functional.cross_entropy(
-                target_logits, flat_targets, ignore_index=-1
+    # Applying the LM head is really demanding in memory and we only need the loss, so we do it
+    # trigger-by-trigger
+    for i, targets_hidden_states_for_trigger in enumerate(
+        targets_hiden_states.unbind(0)
+    ):
+        if fast_lm_loss is None:
+            logits = model.lm_head(targets_hidden_states_for_trigger)
+            flat_logits = logits.view(flat_targets.shape[0], -1)
+            # For each trigger, we extract the probability of each target token given the trigger
+            # and the preceeding target tokens
+            loss_for_trigger = torch.nn.functional.cross_entropy(
+                flat_logits, flat_targets, ignore_index=-1
             )
-        )
-
-    return torch.stack(loss_lst, dim=0)
+        else:
+            loss_for_trigger = fast_lm_loss(
+                targets_hidden_states_for_trigger, flat_targets
+            )
+        loss[i] = loss_for_trigger
+    return loss
 
 
 def make_target_batch(tokenizer, device, target_texts):
@@ -78,33 +112,37 @@ def get_averaged_grad(
     target_tokens: torch.Tensor,
     token_to_flip: int,
     device,
+    targets_embeddings: Optional[torch.Tensor] = None,
 ):
     """Return the gradient of the triger tokens wrt to the loss averaged across all the targets."""
     trigger_embeddings = (
         model.get_input_embeddings()(trigger_tokens).detach().requires_grad_(True)
     )
-    target_inputs = target_tokens.clone()
-    target_inputs[target_inputs == -1] = 1
-    target_embeddings = model.get_input_embeddings()(target_inputs)
+    if targets_embeddings is None:
+        target_inputs = target_tokens.clone()
+        target_inputs[target_inputs == -1] = 1
+        targets_embeddings = model.get_input_embeddings()(target_inputs)
     lm_input = torch.cat(
         [
             trigger_embeddings.unsqueeze(0).expand(
                 target_tokens.shape[0], *trigger_embeddings.shape
             ),
-            target_embeddings,
+            targets_embeddings,
         ],
         dim=1,
     )
+    model.zero_grad()
     lm_output = model(inputs_embeds=lm_input)
     logits = lm_output[0]
     target_logits = logits[:, trigger_tokens.shape[0] - 1 : -1, :].reshape(
-        target_inputs.shape[0] * target_inputs.shape[1], -1
+        target_tokens.shape[0] * target_tokens.shape[1], -1
     )
     loss = torch.nn.functional.cross_entropy(
         target_logits, target_tokens.view(-1), ignore_index=-1
     )
     loss.backward()
     grad_at_token = trigger_embeddings.grad[token_to_flip, :].detach()
+    model.zero_grad()
     return grad_at_token
 
 
@@ -117,9 +155,15 @@ def get_best_k_flips(
     device,
     k: int = 1,
     max_candidates: int = 25,
+    targets_embeddings: Optional[torch.Tensor] = None,
 ) -> List[Tuple[float, torch.Tensor]]:
     averaged_grad = get_averaged_grad(
-        model, trigger_tokens, target_tokens, token_to_flip, device
+        model,
+        trigger_tokens,
+        target_tokens,
+        token_to_flip,
+        targets_embeddings=targets_embeddings,
+        device=device,
     )
     # Hotflip works simultaneously on several positions, but we already know which token
     # we are flipping
@@ -137,7 +181,13 @@ def get_best_k_flips(
     candidate_triggers = trigger_tokens.unsqueeze(0).repeat(len(candidate_tokens), 1)
     candidate_triggers[:, token_to_flip, ...] = candidate_tokens
     with torch.no_grad():
-        curr_loss = get_loss(model, candidate_triggers.unbind(0), target_tokens, device)
+        curr_loss = get_loss(
+            model,
+            candidate_triggers.unbind(0),
+            target_tokens,
+            targets_embeddings=targets_embeddings,
+            device=device,
+        )
         k_best_loss, k_best_loss_indice = curr_loss.topk(k, dim=0)
     return [
         (loss, candidate_triggers[i])
@@ -215,6 +265,10 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
 
     # batch and pad the target tokens
     target_tokens = make_target_batch(tokenizer, device, target_texts)
+    # Precompute the target embeddings
+    target_indices_for_embeddings = target_tokens.clone()
+    target_indices_for_embeddings[target_indices_for_embeddings == -1] = 1
+    targets_embeddings = token_embedding_layer(target_indices_for_embeddings).detach()
 
     # different random restarts of the triggers
     for _ in tqdm.trange(10, unit="restart", desc="Generating triggers"):
@@ -228,9 +282,13 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
             # get initial loss for the trigger
             model.zero_grad()
             with torch.no_grad():
-                loss = get_loss(model, [trigger_tokens], target_tokens, device)[
-                    0
-                ].item()
+                loss = get_loss(
+                    model,
+                    [trigger_tokens],
+                    target_tokens,
+                    targets_embeddings=targets_embeddings,
+                    device=device,
+                )[0].item()
             beam.push((loss, trigger_tokens))
         worse_loss = max(beam)[0]
         tqdm.tqdm.write("Initial triggers:")
@@ -258,8 +316,9 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
                         trigger_tokens,
                         target_tokens,
                         token_to_flip,
-                        device,
                         k=beam_size,
+                        targets_embeddings=targets_embeddings,
+                        device=device,
                     )
                     for curr_loss, curr_trigger_tokens in fan_out:
                         next_beam.pushpop((curr_loss, curr_trigger_tokens))

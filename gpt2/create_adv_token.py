@@ -154,7 +154,7 @@ def get_best_k_flips(
     token_to_flip: int,
     device,
     k: int = 1,
-    max_candidates: int = 100,
+    max_candidates: int = 75,
     targets_embeddings: Optional[torch.Tensor] = None,
 ) -> List[Tuple[float, torch.Tensor]]:
     averaged_grad = get_averaged_grad(

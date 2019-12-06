@@ -14,12 +14,12 @@ import numpy
 @torch.no_grad()
 @torch.jit.script
 def hotflip_attack(
-    averaged_grad,
-    embedding_matrix,
+    averaged_grad: torch.Tensor,
+    embedding_matrix: torch.Tensor,
     increase_loss: bool = False,
     num_candidates: int = 1,
     blacklisted_ids: Optional[torch.Tensor] = None,
-):
+) -> torch.Tensor:
     """
     The "Hotflip" attack described in Equation (2) of the paper. This code is heavily inspired by
     the nice code of Paul Michel here
@@ -43,7 +43,9 @@ def hotflip_attack(
     if blacklisted_ids is not None:
         # FIXME: should not be needed anymore
         blacklisted_ids_t = torch.jit._unwrap_optional(blacklisted_ids)
-        gradient_dot_embedding_matrix[:, blacklisted_ids_t] = torch.tensor(-1e32, dtype=torch.float)
+        gradient_dot_embedding_matrix[:, blacklisted_ids_t] = torch.tensor(
+            -1e32, dtype=torch.float
+        )
     if num_candidates > 1:  # get top k options
         best_k_ids = torch.topk(gradient_dot_embedding_matrix, num_candidates, dim=1)[1]
         return best_k_ids

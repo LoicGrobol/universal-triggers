@@ -1,4 +1,3 @@
-from copy import deepcopy
 import heapq
 import sys
 from typing import Iterable, List, Tuple
@@ -29,32 +28,33 @@ def get_loss(
         tensor_trigger = trigger.unsqueeze(0).expand(targets.shape[0], trigger.shape[0])
         # we feed the model the trigger + target texts
         lm_input = torch.cat((tensor_trigger, targets), dim=1)
-        # `target` is padded with `-1`s at the end of the sequence dimension. This is good when using
-        # them for labels as `-1` in labels are ignored in the loss. However, in inputs, `-1` is not a
-        # valid id, so we put 1 in their places, which will result in useless embeddings, which should
-        # not be an issue since they won't go in the loss, capisce?
+        # `target` is padded with `-1`s at the end of the sequence dimension. This is good when
+        # using them for labels as `-1` in labels are ignored in the loss. However, in inputs, `-1`
+        # is not a valid id, so we put 1 in their places, which will result in useless embeddings,
+        # which should not be an issue since they won't go in the loss, capisce?
         lm_input[lm_input == -1] = 1
         inpts_lst.append(lm_input)
-    inpts = torch.cat(inpts_lst, dim=0)
-    triggers_length = inpts.shape[1] - targets.shape[1]
-    # For each trigger, we extract the probability of each target token given the trigger and the
-    # preceeding target tokens
-    logits_lst = (
-        language_model(inpts)[0][:, triggers_length - 1 : -1, :]
-        .reshape(len(inpts_lst), targets.shape[0] * targets.shape[1], -1)
-        .unbind(0)
-    )
 
     # Avoid recomputing it for each trigger
     flat_targets = targets.reshape(-1)
-    loss = torch.stack(
-        [
-            torch.nn.functional.cross_entropy(logits, flat_targets, ignore_index=-1)
-            for logits in logits_lst
-        ],
-        dim=0,
-    )
-    return loss
+    loss_lst = []
+
+    for inpt in inpts_lst:
+        lm_output = language_model(inpt)
+        logits = lm_output[0]
+        # For each trigger, we extract the probability of each target token given the trigger and
+        # the preceeding target tokens
+        triggers_length = inpt.shape[1] - targets.shape[1]
+        target_logits = logits[:, triggers_length - 1 : -1, :].reshape(
+            targets.shape[0] * targets.shape[1], -1
+        )
+        loss_lst.append(
+            torch.nn.functional.cross_entropy(
+                target_logits, flat_targets, ignore_index=-1
+            )
+        )
+
+    return torch.stack(loss_lst, dim=0)
 
 
 def make_target_batch(tokenizer, device, target_texts):
@@ -73,6 +73,28 @@ def make_target_batch(tokenizer, device, target_texts):
     )
 
 
+def get_averaged_grad(
+    model: GPT2LMHeadModel,
+    embedding_weight: torch.Tensor,
+    embeddings_grad: utils.ValueWrapper,
+    trigger_tokens: torch.Tensor,
+    target_tokens: torch.Tensor,
+    token_to_flip: int,
+    device,
+):
+    model.zero_grad()
+    # Get average gradient w.r.t. the triggers
+    loss = get_loss(model, [trigger_tokens], target_tokens, device)[0]
+    loss.backward()
+    grad_at_token_for_each_sample_in_batch = embeddings_grad.value[
+        :, token_to_flip, :
+    ].detach()
+
+    # Save memory
+    model.zero_grad()
+    return torch.sum(grad_at_token_for_each_sample_in_batch, dim=0)
+
+
 def get_best_k_flips(
     model: GPT2LMHeadModel,
     embedding_weight: torch.Tensor,
@@ -84,22 +106,21 @@ def get_best_k_flips(
     k: int = 1,
     max_candidates: int = 50,
 ) -> List[Tuple[float, torch.Tensor]]:
-    # Get average gradient w.r.t. the triggers
-    loss = get_loss(model, [trigger_tokens], target_tokens, device)[0]
-    loss.backward()
-    grad_at_token_for_each_sample_in_batch = embeddings_grad.value[
-        :, token_to_flip, :
-    ].detach()
-
-    # Save memory
-    model.zero_grad()
-    averaged_grad = torch.sum(grad_at_token_for_each_sample_in_batch, dim=0)
+    averaged_grad = get_averaged_grad(
+        model,
+        embedding_weight,
+        embeddings_grad,
+        trigger_tokens,
+        target_tokens,
+        token_to_flip,
+        device,
+    )
     # Hotflip works simultaneously on several positions, but we already know which token
     # we are flipping
     averaged_grad = averaged_grad.unsqueeze(0)
 
     # Use hotflip (linear approximation) attack to get the top num_candidates
-    candidates = attacks.hotflip_attack(
+    candidate_tokens = attacks.hotflip_attack(
         averaged_grad,
         embedding_weight,
         increase_loss=False,
@@ -107,11 +128,10 @@ def get_best_k_flips(
     ).squeeze(0)
 
     # try all the candidates and pick the best
-    candidate_triggers = [deepcopy(trigger_tokens) for cand in candidates]
-    for triggers, cand in zip(candidate_triggers, candidates):
-        triggers[token_to_flip] = cand
+    candidate_triggers = trigger_tokens.unsqueeze(0).repeat(len(candidate_tokens), 1)
+    candidate_triggers[:, token_to_flip, ...] = candidate_tokens
     with torch.no_grad():
-        curr_loss = get_loss(model, candidate_triggers, target_tokens, device)
+        curr_loss = get_loss(model, candidate_triggers.unbind(0), target_tokens, device)
         k_best_loss, k_best_loss_indice = curr_loss.topk(k, dim=0)
     return [
         (loss, candidate_triggers[i])
@@ -125,20 +145,28 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
     # torch.cuda.manual_seed(0)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
+    print("Loading GPT-2 model")
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    model = GPT2LMHeadModel.from_pretrained("gpt2")
+    # We only need emission probabilities so disable everything else in the output
+    model = GPT2LMHeadModel.from_pretrained(
+        "gpt2",
+        output_hidden_states=False,
+        output_attentions=False,
+        output_past=False,
+        # torchscript=True,
+    )
     model.eval()
     model.to(device)
 
+    print("Setting up parameters")
     token_embedding_layer = model.get_input_embeddings()
     embeddings_grad = utils.observe_output_grad(token_embedding_layer)
     embedding_weight = token_embedding_layer.weight  # save the word embedding matrix
     embedding_weight.requires_grad = True
     embedding_weight = embedding_weight.detach()
 
-    total_vocab_size = (
-        token_embedding_layer.num_embeddings
-    )  # total number of subword pieces in the GPT-2 model
+    # total number of subword pieces in the GPT-2 model
+    total_vocab_size = token_embedding_layer.num_embeddings
 
     # Warning. the below contains extremely offensive content.
     # Create a batch of targets you'd like to increase the likelihood of.
@@ -217,24 +245,21 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
             for token_to_flip in tqdm.trange(
                 0, trigger_token_length, desc="Hotflipping tokens", unit="token"
             ):
-                fan_out = []
+                next_beam = beam[:]
                 for loss, trigger_tokens in beam:
-                    fan_out.extend(
-                        get_best_k_flips(
-                            model,
-                            embedding_weight,
-                            embeddings_grad,
-                            trigger_tokens,
-                            target_tokens,
-                            token_to_flip,
-                            device,
-                            k=beam_size,
-                        )
+                    fan_out = get_best_k_flips(
+                        model,
+                        embedding_weight,
+                        embeddings_grad,
+                        trigger_tokens,
+                        target_tokens,
+                        token_to_flip,
+                        device,
+                        k=beam_size,
                     )
-                for curr_loss, curr_trigger_tokens in heapq.nlargest(
-                    beam_size, fan_out
-                ):
-                    heapq.heappushpop(beam, (-curr_loss, curr_trigger_tokens))
+                    for curr_loss, curr_trigger_tokens in fan_out:
+                        heapq.heappushpop(next_beam, (-curr_loss, curr_trigger_tokens))
+                beam = next_beam
                 curr_worse_loss = -min(beam)[0]
                 # If we have improved something, display and reset the counter
                 if curr_worse_loss < worse_loss:

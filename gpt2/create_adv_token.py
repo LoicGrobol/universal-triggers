@@ -299,12 +299,16 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
         end_iter = False
 
         # this many updates of the entire trigger sequence
-        for _ in tqdm.trange(50, unit="sweep", desc="Refining trigger"):
+        for _ in tqdm.trange(50, unit="sweep", desc="Refining trigger", leave=False):
             if end_iter:
                 break
             # for each token in the trigger
             for token_to_flip in tqdm.trange(
-                0, trigger_token_length, desc="Hotflipping tokens", unit="token"
+                0,
+                trigger_token_length,
+                desc="Hotflipping tokens",
+                unit="token",
+                leave=False,
             ):
                 next_beam = xheap.OrderHeap(beam, key=lambda x: (-x[0], id(x[1])))
                 for loss, trigger_tokens in tqdm.tqdm(

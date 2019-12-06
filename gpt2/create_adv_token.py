@@ -208,7 +208,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
         "gpt2",
         output_hidden_states=False,
         output_attentions=False,
-        output_past=False,
+        # output_past=False,  # We need the past for inference later
         torchscript=True,
     )
     model.eval()

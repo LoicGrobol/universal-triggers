@@ -232,7 +232,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
                     0
                 ].item()
             beam.push((loss, trigger_tokens))
-        worse_loss = -min(beam)[0]
+        worse_loss = max(beam)[0]
         tqdm.tqdm.write("Initial triggers:")
         for loss, trigger_tokens in beam:
             trigger_str = tokenizer.decode(trigger_tokens.tolist())
@@ -248,7 +248,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
             for token_to_flip in tqdm.trange(
                 0, trigger_token_length, desc="Hotflipping tokens", unit="token"
             ):
-                next_beam = xheap.OrderHeap(beam, key=lambda x: (x[0], id(x[1])))
+                next_beam = xheap.OrderHeap(beam, key=lambda x: (-x[0], id(x[1])))
                 for loss, trigger_tokens in tqdm.tqdm(
                     beam, desc="Fanning out", unit="trigger"
                 ):
@@ -268,6 +268,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
                 # If we have improved something, display and reset the counter
                 if curr_worse_loss < worse_loss:
                     counter = 0  # used to exit early if no improvements in the trigger
+                    worse_loss = curr_worse_loss
                     tqdm.tqdm.write("Improved triggers:")
                     for loss, trigger_tokens in beam:
                         trigger_str = tokenizer.decode(trigger_tokens.tolist())
@@ -279,6 +280,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 4):
                     break
                 # If the loss didn't get better, just move to the next word.
                 else:
+                    tqdm.tqdm.write("No improvement, skipping to the next token")
                     counter += 1
 
         # Print final trigger and get 10 samples from the model

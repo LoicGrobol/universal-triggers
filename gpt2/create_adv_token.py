@@ -268,10 +268,10 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 5):
     target_indices_for_embeddings[target_indices_for_embeddings == -1] = 1
     targets_embeddings = token_embedding_layer(target_indices_for_embeddings).detach()
 
+    lowest_loss, best_trigger_tokens = float("inf"), None
     # different random restarts of the triggers
     for _ in tqdm.trange(10, unit="restart", desc="Generating triggers", leave=False):
         tqdm.tqdm.write("Restarting")
-        # FIXME: this doesn't prevent duplicates
         beam: utils.Beam[Tuple[float, torch.Tensor]] = utils.Beam(
             heap_key=lambda x: (-x[0], id(x)),
             set_key=lambda x: tuple(x[1].tolist()),
@@ -295,9 +295,10 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 5):
                     targets_embeddings=targets_embeddings,
                 )[0].item()
             beam.push((loss, trigger_tokens))
+            if loss < lowest_loss:
+                lowest_loss, best_trigger_tokens = loss, trigger_tokens
             trigger_str = tokenizer.decode(trigger_tokens.tolist())
             tqdm.tqdm.write(f"{trigger_str} (Loss: {loss})")
-        lowest_loss, best_trigger_tokens = min(beam, key=lambda x: x[0])
 
         while beam:
             next_beam: utils.Beam[Tuple[float, torch.Tensor]] = utils.Beam(

@@ -358,6 +358,10 @@ def run_model(
             for loss, trigger_tokens in beam:
                 trigger_str = tokenizer.decode(trigger_tokens.tolist())
                 tqdm.tqdm.write(f"{trigger_str} (Loss: {loss})")
+            tqdm.tqdm.write(
+                f"Current best: {tokenizer.decode(best_trigger_tokens.tolist())}"
+                f" (Loss: {lowest_loss})"
+            )
 
         # Print final trigger and get 10 samples from the model
         tqdm.tqdm.write(

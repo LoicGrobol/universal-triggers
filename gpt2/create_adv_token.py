@@ -337,7 +337,7 @@ def run_model(
                 )
                 improved = False
                 for curr_loss, curr_trigger_tokens in fan_out:
-                    if curr_loss <= loss:
+                    if curr_loss < loss:
                         improved = True
                         next_beam.push((curr_loss, curr_trigger_tokens))
                 if not improved:

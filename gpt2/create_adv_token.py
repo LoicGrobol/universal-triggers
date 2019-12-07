@@ -203,15 +203,17 @@ def get_best_k_flips(
     help="Number of candidates for the hotflip attack",
 )
 @click.option("--num_restarts", default=10, help="Number of random restarts")
+@click.option("--seed", default=None, help="Randomization seed for reproductibility")
 def run_model(
     trigger_token_length: int = 6,
     beam_size: int = 5,
     hotflip_candidates: int = 50,
     num_restarts: int = 10,
+    seed: Optional[int] = None,
 ):
-    # np.random.seed(0)
-    # torch.random.manual_seed(0)
-    # torch.cuda.manual_seed(0)
+    if seed is not None:
+        torch.random.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
     print("Loading GPT-2 model")

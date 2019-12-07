@@ -1,3 +1,4 @@
+import click
 import sys
 from typing import Callable, Iterable, Optional, List, Tuple
 
@@ -193,7 +194,19 @@ def get_best_k_flips(
     ]
 
 
-def run_model(trigger_token_length: int = 6, beam_size: int = 5):
+@click.command()
+@click.option("--trigger_token_length", help="Length of the triggers")
+@click.option("--beam_size", help="Size for beam search")
+@click.option(
+    "--hotflip_candidates", help="Number of candidates for the hotflip attack"
+)
+@click.option("--num_restarts", help="Number of random restarts")
+def run_model(
+    trigger_token_length: int = 6,
+    beam_size: int = 5,
+    hotflip_candidates: int = 50,
+    num_restarts: int = 10,
+):
     # np.random.seed(0)
     # torch.random.manual_seed(0)
     # torch.cuda.manual_seed(0)
@@ -315,6 +328,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 5):
                     trigger_tokens,
                     target_tokens,
                     k=beam_size,
+                    max_candidates=hotflip_candidates,
                     targets_embeddings=targets_embeddings,
                 )
                 improved = False

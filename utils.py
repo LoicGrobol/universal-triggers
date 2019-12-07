@@ -1,4 +1,3 @@
-import collections.abc
 from collections import namedtuple
 import dataclasses
 import typing

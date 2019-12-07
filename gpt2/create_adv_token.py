@@ -195,15 +195,20 @@ def get_best_k_flips(
 
 
 @click.command()
-@click.option("--trigger_token_length", default=6, help="Length of the triggers")
-@click.option("--beam_size", default=5, help="Size for beam search")
+@click.option(
+    "--trigger_token_length", default=6, help="Length of the triggers", type=int
+)
+@click.option("--beam_size", default=5, help="Size for beam search", type=int)
 @click.option(
     "--hotflip_candidates",
     default=50,
     help="Number of candidates for the hotflip attack",
+    type=int,
 )
-@click.option("--num_restarts", default=10, help="Number of random restarts")
-@click.option("--seed", default=None, help="Randomization seed for reproductibility")
+@click.option("--num_restarts", default=10, help="Number of random restarts", type=int)
+@click.option(
+    "--seed", default=None, help="Randomization seed for reproductibility", type=int
+)
 def run_model(
     trigger_token_length: int = 6,
     beam_size: int = 5,

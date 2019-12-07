@@ -1,16 +1,153 @@
+import collections.abc
+from collections import namedtuple
 import dataclasses
 import typing
+from typing import List
 
 from operator import itemgetter
 from copy import deepcopy
 import heapq
 import numpy
 import torch
+import torch.jit
 import torch.optim as optim
 from allennlp.common.util import lazy_groups_of
 from allennlp.data.iterators import BucketIterator
 from allennlp.nn.util import move_to_device
 from allennlp.modules.text_field_embedders import TextFieldEmbedder
+
+
+T = typing.TypeVar("T")
+
+
+@dataclasses.dataclass(order=True)
+class BeamHeapElem:
+    heap_key: typing.Any
+    set_key: typing.Hashable
+    value: typing.Any = dataclasses.field(compare=True)
+
+
+class Beam(typing.MutableSet[T]):
+    """Works as both a set and a heap and optionally limit size.
+
+    `set_key` is assumed to be finer than `heap_key`, i.e.
+    `set_key(x) == set_key(y)` ⇒ `heap_key(x) == heap_key(y)`
+    """
+
+    def __init__(
+        self,
+        itr: typing.Optional[typing.Iterable[T]] = None,
+        heap_key: typing.Optional[typing.Callable[[T], typing.Any]] = None,
+        set_key: typing.Optional[typing.Callable[[T], typing.Hashable]] = None,
+        size_limit: typing.Optional[int] = None,
+    ):
+        self._set: typing.Set[typing.Hashable]
+        self._heap: typing.List[BeamHeapElem]
+        self.heap_key: typing.Callable[[T], typing.Any]
+        self.set_key: typing.Callable[[T], typing.Hashable]
+        self.size_limit: typing.Optional[int]
+        if isinstance(itr, Beam):
+            self.heap_key = heap_key if heap_key is not None else itr.heap_key
+            self.set_key = set_key if set_key is not None else itr.set_key
+            self.size_limit = size_limit if size_limit is not None else itr.size_limit
+            self._set = set(itr._set)
+            self._heap = list(itr._heap)
+        else:
+            self.heap_key = heap_key if heap_key is not None else lambda x: x
+            if set_key is not None:
+                self.set_key = set_key
+            else:
+                self.set_key = typing.Cast(typing.Callable[[T], typing.Hashable], hash)
+            self.size_limit = size_limit
+            self._set = set()
+            self._heap = []
+            if itr is not None:
+                self.update(itr)
+
+    def peek(self):
+        return self._heap[0].value
+
+    def add(self, item: T):
+        """Add an element to the beam if the size limit has not been reached else pushpop it."""
+        # Don't use `__contains__` directly to avoid computing the set key twice
+        item_set_key = self.set_key(item)
+        if item_set_key in self._set:
+            return
+        if self.size_limit is None or len(self._set) < self.size_limit:
+            heap_item = BeamHeapElem(self.heap_key(item), item_set_key, item)
+            heapq.heappush(self._heap, heap_item)
+            self._set.add(item_set_key)
+        else:
+            self.pushpop(item)
+
+    push = add
+
+    def update(self, *others: typing.Iterable[T]):
+        for o in others:
+            for e in o:
+                self.add(e)
+
+    def pop(self) -> T:
+        """Return and discard the root of the heap."""
+        item = heapq.heappop(self._heap)
+        self._set.discard(item.set_key)
+        return item.value
+
+    def discard(self, item: T):
+        """Discard an element from the beam.
+
+        **Note** since we have to pop an arbitrary element from the heap, this can be very slow.
+        """
+        item_set_key = self.set_key(item)
+        self._set.discard(item_set_key)
+        #  This could probably be made more efficient by taking into account the heap structure
+        for i, e in enumerate(self._heap):
+            if e.set_key == item_set_key:
+                self._heap.pop(i)
+                heapq.heapify(self._heap)
+                return
+
+    def poppush(self, item: T) -> T:
+        item_set_key = self.set_key(item)
+        heap_item = BeamHeapElem(self.heap_key(item), item_set_key, item)
+        old = heapq.heapreplace(self._heap, heap_item)
+        self._set.discard(old.set_key)
+        self._set.add(item_set_key)
+        return old.value
+
+    replace = poppush
+
+    def pushpop(self, item: T) -> T:
+        """Push `item` to the beam and pop the minimal element of the result
+
+        Note that it `item` is already present, this doesn't push anything.
+        """
+        item_set_key = self.set_key(item)
+        if item_set_key in self._set:
+            return self.pop()
+        heap_item = BeamHeapElem(self.heap_key(item), item_set_key, item)
+        # Note that `old` here might actually be `item`
+        old = heapq.heappushpop(self._heap, heap_item)
+        # If `old` was not `item`, swap them in the set
+        if hash(old.set_key) != hash(item_set_key):
+            self._set.discard(old.set_key)
+            self._set.add(item_set_key)
+        return old.value
+
+    def copy(self) -> "Beam":
+        return
+
+    def __iter__(self) -> typing.Iterator[T]:
+        return iter(e.value for e in self._heap)
+
+    def __len__(self) -> int:
+        return len(self._set)
+
+    def __contains__(self, item):
+        return self._set_key(item) in self._set
+
+    def __repr__(self):
+        return f"Beam({list(self)!r}, heap_key={self.heap_key!r}, set_key={self.set_key!r})"
 
 
 @dataclasses.dataclass
@@ -21,6 +158,36 @@ class ValueWrapper:
     """
 
     value: typing.Any = None
+
+
+@torch.jit.script
+def unflatten_indice(idx: int, stride: List[int]) -> List[int]:
+    res: List[int] = []
+    for s in stride:
+        dim_idx, idx = divmod(idx, s)
+        res.append(dim_idx)
+    return res
+
+
+full_topk_return = namedtuple("full_topk_return", ("values", "indices"))
+
+
+@torch.jit.script
+def full_topk(t: torch.Tensor, k: int = 1, sorted: bool = True) -> full_topk_return:
+    flat_topk = t.view(-1).topk(k, sorted=sorted)
+    stride: List[int] = []
+    # This because bare stride isn't scriptable yet
+    for i in range(len(t.shape)):
+        stride.append(t.stride(i))
+    indices = torch.tensor(
+        [
+            unflatten_indice(flat_topk.indices[i], stride)
+            for i in range(flat_topk.indices.shape[0])
+        ],
+        dtype=torch.long,
+        device=flat_topk.indices.device,
+    )
+    return full_topk_return(values=flat_topk.values, indices=indices)
 
 
 def get_embedding_weight(model):

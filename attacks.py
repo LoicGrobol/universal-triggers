@@ -8,6 +8,8 @@ import torch
 import torch.jit
 import numpy
 
+import utils
+
 
 # TODO: docstring average grad is steps×ids dimensional, in gpt2 there is only one step but could be
 # more
@@ -47,10 +49,53 @@ def hotflip_attack(
             -1e32, dtype=torch.float
         )
     if num_candidates > 1:  # get top k options
-        best_k_ids = torch.topk(gradient_dot_embedding_matrix, num_candidates, dim=1)[1]
+        best_k_ids = torch.topk(
+            gradient_dot_embedding_matrix, num_candidates, dim=1
+        ).indices
         return best_k_ids
     best_at_each_step = gradient_dot_embedding_matrix.argmax(dim=1)
     return best_at_each_step
+
+
+@torch.no_grad()
+@torch.jit.script
+def global_hotflip_attack(
+    averaged_grad: torch.Tensor,
+    embedding_matrix: torch.Tensor,
+    increase_loss: bool = False,
+    num_candidates: int = 1,
+    blacklisted_ids: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    The "Hotflip" attack described in Equation (2) of the paper. This code is heavily inspired by
+    the nice code of Paul Michel here
+    <https://github.com/pmichel31415/translate/blob/paul/pytorch_translate/research/adversarial/adversaries/brute_force_adversary.py>
+
+    This function takes in the model's average_grad over a batch of examples and the model's token
+    embedding matrix. It returns the top token candidates for each position.
+
+    If increase_loss=True, then the attack reverses the sign of the gradient and tries to increase
+    the loss (decrease the model's probability of the true class). For targeted attacks, you want to
+    decrease the loss of the target class (increase_loss=False).
+    """
+    # The result is of size seq_len×voc_size and the (i,k) coef is the (approximated) loss for using
+    # the token with id k in position i while keeping the rest of the sequence constant
+    gradient_dot_embedding_matrix = torch.einsum(
+        "ij,kj->ik", (averaged_grad, embedding_matrix)
+    )
+    if not increase_loss:
+        # lower versus increase the class probability.
+        gradient_dot_embedding_matrix *= -1
+    if blacklisted_ids is not None:
+        # FIXME: should not be needed anymore
+        blacklisted_ids_t = torch.jit._unwrap_optional(blacklisted_ids)
+        gradient_dot_embedding_matrix[:, blacklisted_ids_t] = torch.tensor(
+            -1e32, dtype=torch.float
+        )
+    best_k_ids = utils.full_topk(
+        gradient_dot_embedding_matrix, num_candidates, sorted=False
+    ).indices
+    return best_k_ids
 
 
 def random_attack(embedding_matrix, trigger_token_ids, num_candidates=1):

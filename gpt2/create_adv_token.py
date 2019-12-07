@@ -6,12 +6,12 @@ import torch.jit
 import torch.nn
 import tqdm
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
-import xheap
 
 import sample_from_gpt2
 
 sys.path.append("..")  # noqa
 import attacks
+import utils
 
 
 def get_loss(
@@ -152,7 +152,7 @@ def get_best_k_flips(
     target_tokens: torch.Tensor,
     token_to_flip: Optional[int] = None,
     k: int = 1,
-    max_candidates: int = 50,
+    max_candidates: int = 25,
     targets_embeddings: Optional[torch.Tensor] = None,
 ) -> List[Tuple[float, torch.Tensor]]:
     averaged_grad = get_averaged_grad(
@@ -166,18 +166,20 @@ def get_best_k_flips(
 
     with torch.no_grad():
         # Use hotflip (linear approximation) attack to get the top num_candidates
-        candidate_tokens = attacks.hotflip_attack(
+        candidate_tokens = attacks.global_hotflip_attack(
             averaged_grad,
             embedding_weight,
             increase_loss=False,
             num_candidates=max(max_candidates, k),
-        ).squeeze(0)
+        )
 
         # try all the candidates and pick the best
         candidate_triggers = trigger_tokens.unsqueeze(0).repeat(
             len(candidate_tokens), 1
         )
-        candidate_triggers[:, token_to_flip] = candidate_tokens
+        for i, (position, new_token_indice) in enumerate(candidate_tokens.tolist()):
+            candidate_triggers[i, position] = new_token_indice
+
         curr_loss = get_loss(
             model,
             candidate_triggers.unbind(0),
@@ -191,7 +193,7 @@ def get_best_k_flips(
     ]
 
 
-def run_model(trigger_token_length: int = 6, beam_size: int = 10):
+def run_model(trigger_token_length: int = 6, beam_size: int = 5):
     # np.random.seed(0)
     # torch.random.manual_seed(0)
     # torch.cuda.manual_seed(0)
@@ -268,10 +270,15 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
 
     # different random restarts of the triggers
     for _ in tqdm.trange(10, unit="restart", desc="Generating triggers", leave=False):
+        tqdm.tqdm.write("Restarting")
         # FIXME: this doesn't prevent duplicates
-        beam = xheap.OrderHeap(key=lambda x: (-x[0], id(x)))
+        beam: utils.Beam[Tuple[float, torch.Tensor]] = utils.Beam(
+            heap_key=lambda x: (-x[0], id(x)),
+            set_key=lambda x: tuple(x[1].tolist()),
+            size_limit=beam_size,
+        )
         for _ in tqdm.trange(
-            beam_size, unit="trigger", desc="Initialize beam", leave=False
+            beam_size, unit="trigger", desc="Initializing beam", leave=False
         ):
             # sample random initial trigger
             trigger_tokens = torch.randint(
@@ -290,65 +297,49 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
             beam.push((loss, trigger_tokens))
             trigger_str = tokenizer.decode(trigger_tokens.tolist())
             tqdm.tqdm.write(f"{trigger_str} (Loss: {loss})")
-        worse_loss = max(beam)[0]
+        lowest_loss, best_trigger_tokens = min(beam, key=lambda x: x[0])
 
-        counter = 0
-        end_iter = False
-
-        # this many updates of the entire trigger sequence
-        for _ in tqdm.trange(50, unit="sweep", desc="Refining trigger", leave=False):
-            if end_iter:
-                break
-            # TODO: Use a global hotflip instead of sweeping (reduce the number of candidates maybe)
-            # for each token in the trigger
-            for token_to_flip in tqdm.trange(
-                0,
-                trigger_token_length,
-                desc="Hotflipping tokens",
-                unit="token",
-                leave=False,
+        while beam:
+            next_beam: utils.Beam[Tuple[float, torch.Tensor]] = utils.Beam(
+                heap_key=lambda x: (-x[0], id(x)),
+                set_key=lambda x: tuple(x[1].tolist()),
+                size_limit=beam_size,
+            )
+            for loss, trigger_tokens in tqdm.tqdm(
+                beam, desc="Fanning out", unit="trigger", leave=False
             ):
-                next_beam = xheap.OrderHeap(beam, key=lambda x: (-x[0], id(x[1])))
-                for loss, trigger_tokens in tqdm.tqdm(
-                    beam, desc="Fanning out", unit="trigger", leave=False
-                ):
-                    fan_out = get_best_k_flips(
-                        model,
-                        embedding_weight,
-                        trigger_tokens,
-                        target_tokens,
-                        token_to_flip,
-                        k=beam_size,
-                        targets_embeddings=targets_embeddings,
+                fan_out = get_best_k_flips(
+                    model,
+                    embedding_weight,
+                    trigger_tokens,
+                    target_tokens,
+                    k=beam_size,
+                    targets_embeddings=targets_embeddings,
+                )
+                improved = False
+                for curr_loss, curr_trigger_tokens in fan_out:
+                    if curr_loss <= loss:
+                        improved = True
+                        next_beam.push((curr_loss, curr_trigger_tokens))
+                if not improved:
+                    tqdm.tqdm.write(
+                        f"Local minimum: {tokenizer.decode(trigger_tokens.tolist())}"
+                        f" (Loss: {loss})"
                     )
-                    for curr_loss, curr_trigger_tokens in fan_out:
-                        next_beam.pushpop((curr_loss, curr_trigger_tokens))
-                beam = next_beam
-                curr_worse_loss = beam.peek()[0]
-                # If we have improved something, display and reset the counter
-                if curr_worse_loss < worse_loss:
-                    counter = 0  # used to exit early if no improvements in the trigger
-                    worse_loss = curr_worse_loss
-                    tqdm.tqdm.write("Improved triggers:")
-                    for loss, trigger_tokens in beam:
-                        trigger_str = tokenizer.decode(trigger_tokens.tolist())
-                        tqdm.tqdm.write(f"{trigger_str} (Loss: {loss})")
-                # if you have gone through all trigger_tokens without improvement, end iteration
-                elif counter == trigger_tokens.shape[0]:
-                    tqdm.tqdm.write("No improvement, ending iteration")
-                    end_iter = True
-                    break
-                # If the loss didn't get better, just move to the next word.
-                else:
-                    tqdm.tqdm.write("No improvement, skipping to the next token")
-                    counter += 1
+                    if loss < lowest_loss:
+                        tqdm.tqdm.write("New temp minimum")
+                        lowest_loss, best_trigger_tokens = loss, trigger_tokens
+            beam = next_beam
+            tqdm.tqdm.write("Improved triggers:")
+            for loss, trigger_tokens in beam:
+                trigger_str = tokenizer.decode(trigger_tokens.tolist())
+                tqdm.tqdm.write(f"{trigger_str} (Loss: {loss})")
 
         # Print final trigger and get 10 samples from the model
-        best_loss, best_trigger_tokens = min(beam, key=lambda x: (x[0], id(x[1])))
         tqdm.tqdm.write(
-            f"Final triggers: {tokenizer.decode(best_trigger_tokens.tolist())}"
+            f"Final trigger: {tokenizer.decode(best_trigger_tokens.tolist())}"
+            f" (Loss: {lowest_loss})"
         )
-        tqdm.tqdm.write(f"Loss: {best_loss}")
         tqdm.tqdm.write("Some samples:")
         for _ in range(10):
             out = sample_from_gpt2.sample_sequence(
@@ -364,7 +355,7 @@ def run_model(trigger_token_length: int = 6, beam_size: int = 10):
             for i in range(1):
                 text = tokenizer.decode(out[i])
                 tqdm.tqdm.write(text.strip())
-        tqdm.tqdm.write("=" * 80)
+                tqdm.tqdm.write("=" * 80)
 
 
 if __name__ == "__main__":

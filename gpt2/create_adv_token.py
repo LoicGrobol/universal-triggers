@@ -26,6 +26,8 @@ def get_loss(
     num_targets = targets.shape[0]
     max_target_length = targets.shape[1]
 
+    targets_padding_mask = targets.eq(-1)
+
     # We use this to pre-compute the input embeddings as we reuse them a lot
     model_input_embeddings = model.get_input_embeddings()
     if targets_embeddings is None:
@@ -34,14 +36,14 @@ def get_loss(
         # is not a valid id, so we put 1 in their places, which will result in useless embeddings,
         # which should not be an issue since they won't go in the loss, capisce?
         target_indices_for_embeddings = targets.clone()
-        target_indices_for_embeddings[target_indices_for_embeddings == -1] = 1
+        target_indices_for_embeddings[targets_padding_mask] = 1
         targets_embeddings = model_input_embeddings(target_indices_for_embeddings)
 
     inpts_lst = []
     for trigger in triggers:
         trigger_embeddings = model_input_embeddings(trigger)
         # context is trigger repeated once for each target
-        trigger_embeddings_for_each_target = trigger_embeddings.unsqueeze(0).expand(
+        trigger_embeddings_for_each_target = trigger_embeddings.expand(
             num_targets, *trigger_embeddings.shape
         )
         # we feed the model the trigger + target texts
@@ -58,7 +60,18 @@ def get_loss(
     # Running the transformer is slow but not very demanding in memory if properly parametered so we
     # can run putting all the triggers in a single batch
     lm_inpt = torch.cat(inpts_lst, dim=0)
-    lm_hidden_states = model.transformer(inputs_embeds=lm_inpt)[0]
+    attention_mask = torch.cat(
+        [
+            torch.ones(
+                (num_targets, triggers_length), device=targets.device, dtype=torch.bool
+            ),
+            targets_padding_mask.logical_not(),
+        ],
+        dim=1,
+    ).repeat(num_triggers, 1)
+    lm_hidden_states = model.transformer(
+        inputs_embeds=lm_inpt, attention_mask=attention_mask
+    )[0]
     # We only need the hidden states that will give the logits for the targets, so we extract them
     # here and reformat if to separate the triggers
     targets_hiden_states = lm_hidden_states[:, triggers_length - 1 : -1, :].view(
@@ -114,28 +127,43 @@ def get_averaged_grad(
 ) -> torch.Tensor:
     """Return the gradient of the trigger tokens wrt to the loss averaged across all the targets.
     """
+    num_targets = target_tokens.shape[0]
+    trigger_length = trigger_tokens.shape[0]
+    targets_padding_mask = target_tokens.eq(-1)
+
     model_input_embeddings = model.get_input_embeddings()
     trigger_embeddings = (
         model_input_embeddings(trigger_tokens).detach().requires_grad_(True)
     )
     if targets_embeddings is None:
         target_inputs = target_tokens.clone()
-        target_inputs[target_inputs == -1] = 1
+        target_inputs[targets_padding_mask] = 1
         targets_embeddings = model_input_embeddings(target_inputs)
     lm_input = torch.cat(
         [
             trigger_embeddings.unsqueeze(0).expand(
-                target_tokens.shape[0], *trigger_embeddings.shape
+                num_targets, *trigger_embeddings.shape
             ),
             targets_embeddings,
         ],
         dim=1,
     )
     model.zero_grad()
-    lm_output = model(inputs_embeds=lm_input)
+    attention_mask = torch.cat(
+        [
+            torch.ones(
+                (num_targets, trigger_length),
+                device=target_tokens.device,
+                dtype=torch.bool,
+            ),
+            targets_padding_mask.logical_not(),
+        ],
+        dim=1,
+    )
+    lm_output = model(inputs_embeds=lm_input, attention_mask=attention_mask)
     logits = lm_output[0]
     target_logits = logits[:, trigger_tokens.shape[0] - 1 : -1, :].reshape(
-        target_tokens.shape[0] * target_tokens.shape[1], -1
+        num_targets * target_tokens.shape[1], -1
     )
     loss = torch.nn.functional.cross_entropy(
         target_logits, target_tokens.view(-1), ignore_index=-1
@@ -321,6 +349,7 @@ def run_model(
                 lowest_loss, best_trigger_tokens = loss, trigger_tokens
             trigger_str = tokenizer.decode(trigger_tokens.tolist())
             tqdm.tqdm.write(f"{trigger_str} (Loss: {loss})")
+        assert best_trigger_tokens is not None  # nosec (Mypy isn't *that* clever yet)
 
         while beam:
             next_beam: utils.Beam[Tuple[float, torch.Tensor]] = utils.Beam(
@@ -359,7 +388,7 @@ def run_model(
                 trigger_str = tokenizer.decode(trigger_tokens.tolist())
                 tqdm.tqdm.write(f"{trigger_str} (Loss: {loss})")
             tqdm.tqdm.write(
-                f"Current best: {tokenizer.decode(best_trigger_tokens.tolist())}"
+                f"Best local minimum: {tokenizer.decode(best_trigger_tokens.tolist())}"
                 f" (Loss: {lowest_loss})"
             )
 

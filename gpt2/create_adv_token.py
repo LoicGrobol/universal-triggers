@@ -320,7 +320,9 @@ def run_model(
 
     lowest_loss, best_trigger_tokens = float("inf"), None
     # different random restarts of the triggers
-    for _ in tqdm.trange(10, unit="restart", desc="Generating triggers", leave=False):
+    for _ in tqdm.trange(
+        num_restarts, unit="restart", desc="Generating triggers", leave=False
+    ):
         tqdm.tqdm.write("Restarting")
         beam: utils.Beam[Tuple[float, torch.Tensor]] = utils.Beam(
             heap_key=lambda x: (-x[0], id(x)),

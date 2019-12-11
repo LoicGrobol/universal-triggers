@@ -17,10 +17,6 @@ import utils
 
 
 class GPT2TargetLikelihood(torch.nn.Module):
-    # targets: Final[torch.Tensor]
-    # flat_targets: Final[torch.Tensor]
-    # targets_padding_mask: Final[torch.Tensor]
-    # targets_embeddings: Final[torch.Tensor]
     num_targets: Final[int]
     max_target_length: Final[int]
 
@@ -31,16 +27,18 @@ class GPT2TargetLikelihood(torch.nn.Module):
         self.lm_head = model.lm_head
 
         # At this point we always use the same target, so we might as well cache all of these
-        self.targets = targets
-        self.flat_targets = targets.reshape(-1)
-        self.targets_padding_mask = targets.eq(-1)
+        self.targets: Final[torch.Tensor] = targets
+        self.flat_targets: Final[torch.Tensor] = targets.reshape(-1)
+        self.targets_padding_mask: Final[torch.Tensor] = targets.eq(-1)
         # `target` is padded with `-1`s at the end of the sequence dimension. This is good when
         # using them for labels as `-1` in labels are ignored in the loss. However, in inputs,
         # `-1` is not a valid id, so we put 1 in their places, which will result in useless
         # embeddings, which should not be an issue since they won't go in the loss, capisce?
         target_indices_for_embeddings = self.targets.clone()
         target_indices_for_embeddings[self.targets_padding_mask] = 1
-        self.targets_embeddings = self.input_embeddings(target_indices_for_embeddings)
+        self.targets_embeddings: Final[torch.Tensor] = self.input_embeddings(
+            target_indices_for_embeddings
+        )
 
         self.num_targets = targets.shape[0]
         self.max_target_length = targets.shape[1]
@@ -228,18 +226,35 @@ def get_best_k_flips(
 
 @click.command()
 @click.option(
-    "--trigger_token_length", default=6, help="Length of the triggers", type=int
+    "--trigger_token_length",
+    default=6,
+    help="Length of the triggers",
+    type=int,
+    show_default=True,
 )
-@click.option("--beam_size", default=5, help="Size for beam search", type=int)
+@click.option(
+    "--beam_size", default=5, help="Size for beam search", type=int, show_default=True
+)
 @click.option(
     "--hotflip_candidates",
     default=50,
     help="Number of candidates for the hotflip attack",
     type=int,
+    show_default=True,
 )
-@click.option("--num_restarts", default=10, help="Number of random restarts", type=int)
 @click.option(
-    "--seed", default=None, help="Randomization seed for reproductibility", type=int
+    "--num_restarts",
+    default=10,
+    help="Number of random restarts",
+    type=int,
+    show_default=True,
+)
+@click.option(
+    "--seed",
+    default=None,
+    help="Randomization seed for reproductibility",
+    type=int,
+    show_default=True,
 )
 def run_model(
     trigger_token_length: int = 6,

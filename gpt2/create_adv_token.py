@@ -103,7 +103,7 @@ class GPT2TargetLikelihood(torch.nn.Module):
             # For each trigger, we extract the likelihood of each target token given the
             # trigger and the preceeding target tokens
             loss_for_trigger = torch.nn.functional.cross_entropy(
-                flat_logits, self.flat_targets, ignore_index=-1
+                flat_logits, self.flat_targets, ignore_index=-100
             )
             loss[i] = loss_for_trigger
         return loss
@@ -121,10 +121,11 @@ def make_target_batch(tokenizer, device, target_texts):
         encoded_texts.append(encoded_target_text)
 
     return torch.nn.utils.rnn.pad_sequence(
-        encoded_texts, padding_value=-1, batch_first=True
+        encoded_texts, padding_value=-100, batch_first=True
     )
 
 
+# TODO: this could probably be factored in GPT2TargetLikelihood
 def get_averaged_grad(
     model: GPT2LMHeadModel,
     trigger_tokens: torch.Tensor,
@@ -172,7 +173,7 @@ def get_averaged_grad(
         num_targets * target_tokens.shape[1], -1
     )
     loss = torch.nn.functional.cross_entropy(
-        target_logits, target_tokens.view(-1), ignore_index=-1
+        target_logits, target_tokens.view(-1), ignore_index=-100
     )
     loss.backward()
     embeddings_average_grad = trigger_embeddings.grad.detach()
